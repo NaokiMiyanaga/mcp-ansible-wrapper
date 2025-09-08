@@ -1,0 +1,6 @@
+ietf-network:networks:
+  operational:
+    vlans:
+    - vlan-id: 10
+      svi:
+        address: 0.0.10.254/24

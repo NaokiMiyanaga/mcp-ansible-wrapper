@@ -1,0 +1,26 @@
+---
+- name: FRR connectivity and status check
+  hosts: frr
+  gather_facts: false
+  tasks:
+    - name: Resolve host key (short name)
+      ansible.builtin.set_fact:
+        host_key: "{{ inventory_hostname.split('.')[0] }}"
+
+    - name: Show FRR version
+      ansible.builtin.command: vtysh -c 'show version'
+      register: frr_version
+      changed_when: false
+
+    - name: Show BGP summary
+      ansible.builtin.command: vtysh -c 'show ip bgp summary'
+      register: bgp_summary
+      failed_when: false
+      changed_when: false
+
+    - name: Print outputs
+      ansible.builtin.debug:
+        msg:
+          - "Host: {{ host_key }}"
+          - "FRR Version:\n{{ frr_version.stdout | default('') }}"
+          - "BGP Summary:\n{{ bgp_summary.stdout | default('N/A') }}"

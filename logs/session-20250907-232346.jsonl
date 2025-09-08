@@ -1,0 +1,6 @@
+{"ts": "2025-09-07T23:24:01.733178+00:00", "kind": "http_request", "path": "/mcp/run", "method": "POST", "body": "{\"playbook\":\"network_configuration.yml\",\"limit\":\"localhost\"}"}
+{"ts": "2025-09-07T23:24:01.734238+00:00", "step": "gpt_request", "payload": {"raw_body": {"playbook": "network_configuration.yml", "limit": "localhost"}}}
+{"ts": "2025-09-07T23:24:01.734782+00:00", "step": "allow_check", "payload": {"workdir": "/app", "rel_path": "network_configuration.yml", "patterns": ["*.yml"], "matched": true, "reason": "matched pattern"}}
+{"ts": "2025-09-07T23:24:01.735003+00:00", "step": "ansible_request", "payload": {"cmd": ["ansible-playbook", "/app/network_configuration.yml", "-l", "localhost"], "cwd": "/app"}}
+{"ts": "2025-09-07T23:24:01.944201+00:00", "step": "ansible_result", "payload": {"exit_code": 1, "elapsed_sec": 0.209, "stdout_head": "", "stderr_head": "ERROR! the playbook: /app/network_configuration.yml could not be found\n"}}
+{"ts": "2025-09-07T23:24:01.944652+00:00", "kind": "http_response", "status": 200, "body": "{\"ok\":false,\"exit_code\":1,\"stdout\":\"\",\"stderr\":\"ERROR! the playbook: /app/network_configuration.yml could not be found\\n\",\"elapsed_sec\":0.209}"}

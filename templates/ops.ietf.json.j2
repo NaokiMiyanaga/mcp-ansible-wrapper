@@ -1,0 +1,93 @@
+{
+  "ietf-network:networks": {
+    "network": [
+      {
+        "network-id": "management-plane",
+        "node": [
+{% for h in (groups.get('frr', []) + groups.get('linux_bridge', [])) | unique %}
+          {
+            "node-id": {{ (h.split('.')[0]) | to_json }},
+            "ietf-network-topology:termination-point": [
+              {
+                "tp-id": {{ (h.split('.')[0] ~ '-mgmt') | to_json }},
+                "operational:ipv4": {{ (hostvars[h].get('mgmt_ipv4','')) | to_json }}
+              }
+            ]
+          }{% if not loop.last %},{% endif %}
+{% endfor %}
+        ]
+      },
+      {
+        "network-id": "service-plane",
+        "node": [
+{% for h in groups.get('frr', []) %}
+          {
+            "node-id": {{ (h.split('.')[0]) | to_json }},
+            "ietf-network-topology:termination-point": [
+              {
+                "tp-id": {{ (h.split('.')[0] ~ '-svc') | to_json }},
+                "operational:ipv4": {{ (hostvars[h].get('svc_ipv4','')) | to_json }}
+              }
+            ]
+          }{% if not loop.last %},{% endif %}
+{% endfor %}
+        ]
+      }
+{% for it in (vlans_meta | default({}) | dict2items) %}
+{% set vid = it.key %}
+{% set meta = it.value %}
+      ,{
+        "network-id": {{ ('vlan' ~ vid) | to_json }},
+        "node": [
+          {
+            "node-id": {{ meta.get('svi', {}).get('node', '') | to_json }},
+            "ietf-network-topology:termination-point": [
+              {
+                "tp-id": {{ (meta.get('svi', {}).get('node', '') ~ '-vlan' ~ vid) | to_json }},
+                "operational:role": "svi",
+                "operational:ipv4": {{ meta.get('svi', {}).get('address', '') | to_json }}
+              }
+            ]
+          }
+{% for h in groups.get('linux_bridge', []) %}
+{% set has_vlan = ('brvlan' ~ vid) in (hostvars[h].get('bridge_detail_txt','')) %}
+{% if has_vlan %}
+          ,{
+            "node-id": {{ (h.split('.')[0]) | to_json }},
+            "ietf-network-topology:termination-point": [
+              {
+                "tp-id": {{ (h.split('.')[0] ~ '-vlan' ~ vid) | to_json }},
+                "operational:role": "access-port",
+                "operational:vlan": {{ vid }}
+              }
+            ]
+          }
+{% endif %}
+{% endfor %}
+        ]
+      }
+{% endfor %}
+    ],
+    "operational": {
+      "frr": [
+{% for h in groups.get('frr', []) %}
+        {
+          "node": {{ (h.split('.')[0]) | to_json }},
+          "version": {{ (hostvars[h].get('frr_version_txt','')) | to_json }},
+          "bgp_summary": {{ (hostvars[h].get('bgp_summary_txt','')) | to_json }},
+          "interfaces_brief": {{ (hostvars[h].get('interfaces_brief_txt','')) | to_json }}
+        }{% if not loop.last %},{% endif %}
+{% endfor %}
+      ],
+      "bridge": [
+{% for h in groups.get('linux_bridge', []) %}
+        {
+          "node": {{ (h.split('.')[0]) | to_json }},
+          "bridge_link": {{ (hostvars[h].get('bridge_link_txt','')) | to_json }},
+          "bridge_detail": {{ (hostvars[h].get('bridge_detail_txt','')) | to_json }}
+        }{% if not loop.last %},{% endif %}
+{% endfor %}
+      ]
+    }
+  }
+}

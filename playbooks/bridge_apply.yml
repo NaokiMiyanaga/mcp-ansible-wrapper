@@ -1,0 +1,55 @@
+---
+- name: Apply Linux bridge intent (from policy)
+  hosts: linux_bridge
+  gather_facts: false
+  vars:
+    host_key: "{{ inventory_hostname.split('.')[0] }}"
+    host_cfg: "{{ bridge_apply.get(host_key) | default({}) }}"
+  tasks:
+    - name: Show intended bridge config
+      ansible.builtin.debug:
+        var: host_cfg
+
+    - name: Gather current bridges
+      ansible.builtin.command:
+        argv: ["bash", "-lc", "ip -br link show type bridge | awk '{print $1}'"]
+      register: current_bridges
+      changed_when: false
+      failed_when: false
+
+    - name: Set list of VLANs to apply
+      ansible.builtin.set_fact:
+        vlans: "{{ host_cfg.vlans | default([]) }}"
+
+    - name: Probe NET_ADMIN capability (can create bridge?)
+      ansible.builtin.command:
+        argv: ["ip", "link", "add", "__mcp_probe", "type", "bridge"]
+      register: probe_create
+      failed_when: false
+      changed_when: false
+
+    - name: Cleanup probe bridge if created
+      ansible.builtin.command:
+        argv: ["ip", "link", "del", "__mcp_probe"]
+      when: probe_create.rc == 0
+      failed_when: false
+      changed_when: false
+
+    - name: Set capability flag
+      ansible.builtin.set_fact:
+        cap_ok: "{{ probe_create.rc == 0 }}"
+
+    - name: Note when NET_ADMIN is missing
+      ansible.builtin.debug:
+        msg: "Skipping Linux bridge apply on {{ inventory_hostname }}: NET_ADMIN not granted (set cap_add: [NET_ADMIN])"
+      when: not cap_ok | bool
+
+    - name: Apply per-VLAN bridge state (idempotent)
+      ansible.builtin.include_tasks: tasks/bridge_vlan.yml
+      vars:
+        br_name: "brvlan{{ item }}"
+        vlan_id: "{{ item }}"
+      loop: "{{ vlans }}"
+      loop_control:
+        label: "{{ br_name }}"
+      when: cap_ok | bool

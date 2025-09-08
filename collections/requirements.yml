@@ -1,0 +1,19 @@
+---
+collections:
+  # FRR modules (e.g., frr.frr.*)
+  - name: frr.frr
+
+  # Network helpers and common connection plugins
+  - name: ansible.netcommon
+
+  # Broad set incl. nmcli, etc. (useful for Linux bridge via NetworkManager)
+  - name: community.general
+
+  # Additional networking modules
+  - name: community.network
+
+  # Posix utilities (firewalld, sysctl, mount, etc.)
+  - name: ansible.posix
+
+  # Docker connection/plugins (run tasks inside local containers)
+  - name: community.docker

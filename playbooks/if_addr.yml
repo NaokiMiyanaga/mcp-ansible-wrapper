@@ -1,0 +1,53 @@
+---
+- name: Manage interface IPv4 address
+  hosts: all
+  gather_facts: false
+  vars:
+    if_name: ""          # required
+    addr: ""             # CIDR, e.g., 10.0.0.10/24 (required for add/replace)
+    action: "show"        # add | del | replace | flush | show
+  tasks:
+    - name: Validate args
+      ansible.builtin.assert:
+        that:
+          - if_name is string and if_name != ''
+          - action in ['add','del','replace','flush','show']
+          - (addr != '') or (action in ['flush','show'])
+        fail_msg: "if_name required; addr required unless action=flush/show"
+
+    - name: Show current addresses
+      ansible.builtin.command:
+        argv: ["ip", "-o", "addr", "show", "dev", "{{ if_name }}"]
+      register: before
+      changed_when: false
+
+    - name: Flush all IPv4 addresses
+      ansible.builtin.command:
+        argv: ["ip", "addr", "flush", "dev", "{{ if_name }}"]
+      when: action in ['flush','replace']
+
+    - name: Delete specific IPv4 address
+      ansible.builtin.command:
+        argv: ["ip", "addr", "del", "{{ addr }}", "dev", "{{ if_name }}"]
+      when: action == 'del'
+
+    - name: Add IPv4 address
+      ansible.builtin.command:
+        argv: ["ip", "addr", "add", "{{ addr }}", "dev", "{{ if_name }}"]
+      when: action in ['add','replace']
+
+    - name: Show addresses after change
+      ansible.builtin.command:
+        argv: ["ip", "-o", "addr", "show", "dev", "{{ if_name }}"]
+      register: after
+      changed_when: false
+
+    - name: Summary
+      ansible.builtin.debug:
+        msg:
+          - "device: {{ if_name }}"
+          - "action: {{ action }}"
+          - "addr: {{ addr }}"
+          - "before:\n{{ before.stdout }}"
+          - "after:\n{{ after.stdout }}"
+

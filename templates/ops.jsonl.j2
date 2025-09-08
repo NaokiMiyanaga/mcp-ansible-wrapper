@@ -1,0 +1,118 @@
+{#
+  JSONL (NDJSON) export for external loader loadJSONL.py
+  Uses hyphenated keys (network-id, node-id, tp-id, link-id) to match loader expectations.
+  Adds minimal metadata fields for traceability.
+#}
+{% set snapshot_at = lookup('pipe','date -u +%Y%m%dT%H%M%SZ') %}
+{% set generator = 'mcp-ansible-wrapper' %}
+{% set schema_version = '1' %}
+{# networks: management-plane & service-plane #}
+{% for net_id, group in [('management-plane', (groups.get('frr', []) + groups.get('linux_bridge', [])) | unique), ('service-plane', groups.get('frr', []))] %}
+{{ {"type":"network","network-id":net_id, "snapshot_at":snapshot_at, "generator":generator, "schema_version":schema_version} | to_json }}
+{% for h in group %}
+{{ {"type":"node","network-id":net_id,"node-id":h.split('.')[0], "snapshot_at":snapshot_at, "generator":generator, "schema_version":schema_version} | to_json }}
+{% if net_id == 'management-plane' %}
+{{ {"type":"termination-point","network-id":net_id,"node-id":h.split('.')[0],"tp-id":h.split('.')[0] ~ '-mgmt',"operational:ipv4":hostvars[h].get('mgmt_ipv4',''), "snapshot_at":snapshot_at, "generator":generator, "schema_version":schema_version} | to_json }}
+{% else %}
+{{ {"type":"termination-point","network-id":net_id,"node-id":h.split('.')[0],"tp-id":h.split('.')[0] ~ '-svc',"operational:ipv4":hostvars[h].get('svc_ipv4',''), "snapshot_at":snapshot_at, "generator":generator, "schema_version":schema_version} | to_json }}
+{% endif %}
+{% endfor %}
+{% endfor %}
+
+{# VLAN networks with SVI and L2 access #}
+{% for it in (vlans_meta | default({}) | dict2items) %}
+{% set vid = it.key %}
+{% set meta = it.value %}
+{{ {"type":"network","network-id":('vlan' ~ vid), "snapshot_at":snapshot_at, "generator":generator, "schema_version":schema_version} | to_json }}
+{{ {"type":"node","network-id":('vlan' ~ vid),"node-id":meta.get('svi',{}).get('node',''), "snapshot_at":snapshot_at, "generator":generator, "schema_version":schema_version} | to_json }}
+{{ {"type":"termination-point","network-id":('vlan' ~ vid),"node-id":meta.get('svi',{}).get('node',''),"tp-id":(meta.get('svi',{}).get('node','') ~ '-vlan' ~ vid),"operational:role":"svi","operational:ipv4":meta.get('svi',{}).get('address',''), "snapshot_at":snapshot_at, "generator":generator, "schema_version":schema_version} | to_json }}
+{% for h in groups.get('linux_bridge', []) %}
+{% set has_vlan = ('brvlan' ~ vid) in (hostvars[h].get('bridge_detail_txt','')) %}
+{% if has_vlan %}
+{{ {"type":"node","network-id":('vlan' ~ vid),"node-id":h.split('.')[0], "snapshot_at":snapshot_at, "generator":generator, "schema_version":schema_version} | to_json }}
+{{ {"type":"termination-point","network-id":('vlan' ~ vid),"node-id":h.split('.')[0],"tp-id":h.split('.')[0] ~ '-vlan' ~ vid,"operational:role":"access-port","operational:vlan":vid, "snapshot_at":snapshot_at, "generator":generator, "schema_version":schema_version} | to_json }}
+{% endif %}
+{% endfor %}
+{% endfor %}
+
+{# Operational blobs (FRR/Bridge) #}
+{% for h in groups.get('frr', []) %}
+{{ {"type":"frr_status","node-id":h.split('.')[0],"version":hostvars[h].get('frr_version_txt',''),"bgp_summary":hostvars[h].get('bgp_summary_txt',''),"interfaces_brief":hostvars[h].get('interfaces_brief_txt',''), "snapshot_at":snapshot_at, "generator":generator, "schema_version":schema_version} | to_json }}
+{% endfor %}
+{% for h in groups.get('linux_bridge', []) %}
+{{ {"type":"bridge_status","node-id":h.split('.')[0],"bridge_link":hostvars[h].get('bridge_link_txt',''),"bridge_detail":hostvars[h].get('bridge_detail_txt',''), "snapshot_at":snapshot_at, "generator":generator, "schema_version":schema_version} | to_json }}
+{% endfor %}
+
+{# BGP neighbors (structured) #}
+{% for h in groups.get('frr', []) %}
+{% set nid = h.split('.')[0] %}
+{% set bs = hostvars[h].get('bgp_summary_parsed', {}) %}
+{% set uni = bs.get('ipv4Unicast', {}) %}
+{% set peers = uni.get('peers', {}) %}
+{% for peer_ip, p in peers.items() %}
+{{ {"type":"bgp_neighbor","node-id":nid, "peer":peer_ip, "remote-as":p.get('remoteAs'), "state":p.get('state') or p.get('peerState'), "uptime":p.get('uptime') or p.get('upDownTime'), "pfxRcd":p.get('pfxRcd'), "snapshot_at":snapshot_at, "generator":generator, "schema_version":schema_version} | to_json }}
+{% endfor %}
+{% endfor %}
+
+{# Interface records (structured, minimal) #}
+{% for h in groups.get('frr', []) %}
+{% set nid = h.split('.')[0] %}
+{% if hostvars[h].get('mgmt_if_name','') %}
+{% set _mg = hostvars[h].get('mgmt_if_name') %}
+{% set _links = hostvars[h].get('if_links_txt','') %}
+{% set _mg_up = (_links is search(' ' ~ _mg ~ ':')) and (_links is search(' state UP ')) %}
+{{ {"type":"interface","node-id":nid, "name":_mg, "plane":"management", "ipv4":hostvars[h].get('mgmt_ipv4',''), "link": ('up' if _mg_up else 'down'), "proto": (hostvars[h].get('mgmt_proto_state','unknown') | lower), "snapshot_at":snapshot_at, "generator":generator, "schema_version":schema_version} | to_json }}
+{% endif %}
+{% if hostvars[h].get('svc_if_name','') %}
+{% set _sv = hostvars[h].get('svc_if_name') %}
+{% set _links = hostvars[h].get('if_links_txt','') %}
+{% set _sv_up = (_links is search(' ' ~ _sv ~ ':')) and (_links is search(' state UP ')) %}
+{{ {"type":"interface","node-id":nid, "name":_sv, "plane":"service", "ipv4":hostvars[h].get('svc_ipv4',''), "link": ('up' if _sv_up else 'down'), "proto": (hostvars[h].get('svc_proto_state','unknown') | lower), "snapshot_at":snapshot_at, "generator":generator, "schema_version":schema_version} | to_json }}
+
+{# Per-node summary (BGP counts and link/proto mismatches) #}
+{% set bs = hostvars[h].get('bgp_summary_parsed', {}) %}
+{% set uni = bs.get('ipv4Unicast', {}) %}
+{% set peers = uni.get('peers', {}) %}
+{% set peers_total = peers | length %}
+{% set states = peers.values() | list | map(attribute='state') | list %}
+{% set peers_established = (states | select('equalto','Established') | list | length) %}
+{% set peers_not_established = peers_total - peers_established %}
+{% set mgmt_proto = (hostvars[h].get('mgmt_proto_state','unknown') | lower) %}
+{% set svc_proto = (hostvars[h].get('svc_proto_state','unknown') | lower) %}
+{% set if_mismatch = (1 if (_mg_up and mgmt_proto == 'down') else 0) + (1 if (_sv_up and svc_proto == 'down') else 0) %}
+{{ {"type":"summary","node-id":nid, "peers_total":peers_total, "peers_established":peers_established, "peers_not_established":peers_not_established, "if_link_up_proto_down":if_mismatch, "snapshot_at":snapshot_at, "generator":generator, "schema_version":schema_version} | to_json }}
+{% endif %}
+{% endfor %}
+
+{# Interface records from FRR JSON (fallback/all IFs) #}
+{% for h in groups.get('frr', []) %}
+{% set nid = h.split('.')[0] %}
+{% set ifmap = hostvars[h].get('interfaces_json_parsed', {}) %}
+{% for ifname, idef in ifmap.items() %}
+{% set lproto = (idef.get('lineProtocol','unknown') | lower) %}
+{% set lstate = (idef.get('operState', idef.get('state','unknown')) | lower) %}
+{{ {"type":"interface","node-id":nid, "name":ifname, "plane":"unknown", "ipv4":"", "link": lstate, "proto": lproto, "snapshot_at":snapshot_at, "generator":generator, "schema_version":schema_version} | to_json }}
+{% endfor %}
+
+{# Routes (flatten minimal fields) #}
+{% for h in groups.get('frr', []) %}
+{% set nid = h.split('.')[0] %}
+{% set _rt = hostvars[h].get('ip_route_parsed', {}) %}
+{% set _rt1 = _rt.get('routes', {}) %}
+{% set _rt2 = _rt.get('vrfs', {}).get('default', {}).get('routes', {}) %}
+{% set routes = _rt1 if _rt1 else _rt2 %}
+{% for prefix, entries in routes.items() %}
+{% for e in (entries or []) %}
+{% set proto = e.get('protocol','') %}
+{% set nhs = e.get('nexthops', []) %}
+{% if nhs %}
+{% for nh in nhs %}
+{{ {"type":"route","node-id":nid, "prefix":prefix, "protocol":proto, "nexthop":nh.get('ip',''), "snapshot_at":snapshot_at, "generator":generator, "schema_version":schema_version} | to_json }}
+{% endfor %}
+{% else %}
+{{ {"type":"route","node-id":nid, "prefix":prefix, "protocol":proto, "nexthop":"", "snapshot_at":snapshot_at, "generator":generator, "schema_version":schema_version} | to_json }}
+{% endif %}
+{% endfor %}
+{% endfor %}
+{% endfor %}
+{% endfor %}

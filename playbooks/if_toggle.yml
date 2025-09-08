@@ -1,0 +1,64 @@
+---
+- name: Toggle interface state by plane
+  hosts: all
+  gather_facts: false
+  vars:
+    plane: "service"   # service | management
+    state: "down"      # down | up | show
+    if_name: ""        # optional; when set, skip auto-detect
+  tasks:
+    - name: Validate inputs
+      ansible.builtin.assert:
+        that:
+          - plane in ['service','management']
+          - state in ['up','down']
+        fail_msg: "Invalid plane/state. plane=service|management, state=up|down"
+
+    - name: Compute regex prefix for plane
+      ansible.builtin.set_fact:
+        _prefix_awk: >-
+          {{
+            (svc_subnet.split('/') | first).rsplit('.', 1)[0] | replace('.', '\\.') if plane=='service' else
+            (mgmt_subnet.split('/') | first).rsplit('.', 1)[0] | replace('.', '\\.')
+          }}
+
+    - name: Detect interface by IPv4 prefix ({{ plane }})
+      ansible.builtin.shell: |-
+        ip -o -4 addr show scope global |
+        awk '$2!="lo" && $4 ~ /^{{ _prefix_awk }}\./ {print $2; exit}'
+      args:
+        executable: /bin/bash
+      register: det_if
+      changed_when: false
+      when: (if_name | default('')) == ''
+
+    - name: Pick target interface name
+      ansible.builtin.set_fact:
+        target_if: "{{ (if_name | default('')) or (det_if.stdout | default('')) }}"
+
+    - name: Fail when interface not detected
+      ansible.builtin.fail:
+        msg: "No interface found (if_name is empty and auto-detect failed for plane={{ plane }})"
+      when: (target_if | default('')) == ''
+
+    - name: Toggle link {{ state }} on {{ target_if }}
+      ansible.builtin.command:
+        argv: ["ip", "link", "set", "dev", "{{ target_if }}", "{{ state }}"]
+      register: toggle_rc
+      changed_when: state != 'show'
+      when: state != 'show'
+
+    - name: Show link state after toggle
+      ansible.builtin.command:
+        argv: ["ip", "-o", "link", "show", "dev", "{{ target_if }}"]
+      register: link_after
+      changed_when: false
+
+    - name: Debug summary
+      ansible.builtin.debug:
+        msg:
+          - "target: {{ inventory_hostname }}"
+          - "plane: {{ plane }}"
+          - "interface: {{ target_if }}"
+          - "state: {{ state }}"
+          - "after: {{ link_after.stdout }}"

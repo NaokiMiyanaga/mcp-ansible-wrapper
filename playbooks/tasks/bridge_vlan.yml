@@ -1,0 +1,96 @@
+---
+- name: Check if bridge exists
+  ansible.builtin.command:
+    argv: ["ip", "link", "show", "{{ br_name }}"]
+  register: br_exist
+  changed_when: false
+  failed_when: false
+
+- name: Create bridge when missing
+  ansible.builtin.command:
+    argv: ["ip", "link", "add", "name", "{{ br_name }}", "type", "bridge"]
+  when: br_exist.rc != 0
+
+- name: Check bridge link state
+  ansible.builtin.command:
+    argv: ["ip", "-o", "link", "show", "dev", "{{ br_name }}"]
+  register: bridge_link
+  changed_when: false
+
+- name: Ensure bridge is up
+  ansible.builtin.command:
+    argv: ["ip", "link", "set", "dev", "{{ br_name }}", "up"]
+  when: bridge_link.stdout is not defined or (bridge_link.stdout.find(' state UP ') == -1)
+
+## Attach VLAN-side interface to the bridge (exclude mgmt and loopback)
+
+- name: Set VLAN subnet fact (from vlans_meta)
+  ansible.builtin.set_fact:
+    vlan_subnet: "{{ (vlans_meta.get(vlan_id, {}).get('ipv4_subnet', '')) }}"
+
+- name: Compute VLAN prefix for regex
+  ansible.builtin.set_fact:
+    vlan_prefix_awk: "{{ (vlan_subnet.split('/') | first).rsplit('.', 1)[0] | replace('.', '\\.') if vlan_subnet else '' }}"
+
+- name: Detect data interface by VLAN subnet (preferred)
+  ansible.builtin.command:
+    argv:
+      - bash
+      - -lc
+      - >-
+        ip -o -4 addr show scope global |
+        awk '$2!="lo" && $4 ~ /^{{ vlan_prefix_awk }}\./ {print $2; exit}'
+  register: data_if_vlan
+  changed_when: false
+  failed_when: false
+  when: vlan_prefix_awk != ''
+
+- name: Compute mgmt prefix for fallback regex
+  ansible.builtin.set_fact:
+    mgmt_prefix_awk: "{{ (mgmt_subnet.split('/') | first).rsplit('.', 1)[0] | replace('.', '\\.') if (mgmt_subnet is defined and mgmt_subnet != '') else '' }}"
+
+- name: Fallback detect data interface (first non-mgmt global IPv4 iface)
+  ansible.builtin.command:
+    argv:
+      - bash
+      - -lc
+      - >-
+        ip -o -4 addr show scope global |
+        awk '$2!="lo" && $4 !~ /^{{ mgmt_prefix_awk }}\./ {print $2; exit}'
+  register: data_if_fallback
+  changed_when: false
+  failed_when: false
+  when: data_if_vlan is not defined or (data_if_vlan.stdout | default('')) == ''
+
+- name: Select data interface name
+  ansible.builtin.set_fact:
+    data_if_name: "{{ (data_if_vlan.stdout | default('')) or (data_if_fallback.stdout | default('')) }}"
+
+- name: Get current master of data interface
+  ansible.builtin.command:
+    argv:
+      - bash
+      - -lc
+      - >-
+        bridge link show dev {{ data_if_name }} 2>/dev/null | grep -o 'master [^ ]*' | awk '{print $2}' || true
+  register: port_master
+  changed_when: false
+  failed_when: false
+  when: data_if_name is defined and data_if_name != ''
+
+- name: Attach data interface to bridge if needed
+  ansible.builtin.command:
+    argv: ["ip", "link", "set", "dev", "{{ data_if_name }}", "master", "{{ br_name }}"]
+  when: data_if_name is defined and data_if_name != '' and (port_master.stdout | default('')) != br_name
+
+- name: Check data interface link state
+  ansible.builtin.command:
+    argv: ["ip", "-o", "link", "show", "dev", "{{ data_if_name }}"]
+  register: data_link
+  changed_when: false
+  when: data_if_name is defined and data_if_name != ''
+
+- name: Ensure data interface is up
+  ansible.builtin.command:
+    argv: ["ip", "link", "set", "dev", "{{ data_if_name }}", "up"]
+  when: data_if_name is defined and data_if_name != '' and (data_link.stdout is not defined or (data_link.stdout.find(' state UP ') == -1))

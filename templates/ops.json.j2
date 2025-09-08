@@ -1,0 +1,22 @@
+{
+  "frr": [
+{% for h in groups.get('frr', []) %}
+    {
+      "host": {{ h | to_json }},
+      "host_key": {{ (h.split('.')[0]) | to_json }},
+      "frr_version": {{ (hostvars[h].get('frr_version_txt','')) | to_json }},
+      "bgp_summary": {{ (hostvars[h].get('bgp_summary_txt','')) | to_json }}
+    }{% if not loop.last %},{% endif %}
+{% endfor %}
+  ],
+  "bridge": [
+{% for h in groups.get('linux_bridge', []) %}
+    {
+      "host": {{ h | to_json }},
+      "host_key": {{ (h.split('.')[0]) | to_json }},
+      "bridge_link": {{ (hostvars[h].get('bridge_link_txt','')) | to_json }},
+      "bridge_detail": {{ (hostvars[h].get('bridge_detail_txt','')) | to_json }}
+    }{% if not loop.last %},{% endif %}
+{% endfor %}
+  ]
+}

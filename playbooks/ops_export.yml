@@ -1,0 +1,217 @@
+---
+- name: Collect FRR operational data
+  hosts: frr
+  gather_facts: false
+  tasks:
+    - name: Compute mgmt/svc regex prefixes
+      ansible.builtin.set_fact:
+        mgmt_prefix_awk: "{{ (mgmt_subnet.split('/') | first).rsplit('.', 1)[0] | replace('.', '\\.') if (mgmt_subnet is defined and mgmt_subnet != '') else '' }}"
+        svc_prefix_awk: "{{ (svc_subnet.split('/') | first).rsplit('.', 1)[0] | replace('.', '\\.') if (svc_subnet is defined and svc_subnet != '') else '' }}"
+
+    - name: Detect mgmt IPv4
+      ansible.builtin.shell: |-
+        ip -o -4 addr show scope global |
+        awk '$2!="lo" && $4 ~ /^{{ mgmt_prefix_awk }}\./ {print $4; exit}'
+      args:
+        executable: /bin/bash
+      register: mgmt_ip_out
+      changed_when: false
+      failed_when: false
+      when: mgmt_prefix_awk != ''
+
+    - name: Detect mgmt interface name
+      ansible.builtin.shell: |-
+        ip -o -4 addr show scope global |
+        awk '$2!="lo" && $4 ~ /^{{ mgmt_prefix_awk }}\./ {print $2; exit}'
+      args:
+        executable: /bin/bash
+      register: mgmt_if_out
+      changed_when: false
+      failed_when: false
+      when: mgmt_prefix_awk != ''
+
+    - name: Detect svc IPv4
+      ansible.builtin.shell: |-
+        ip -o -4 addr show scope global |
+        awk '$2!="lo" && $4 ~ /^{{ svc_prefix_awk }}\./ {print $4; exit}'
+      args:
+        executable: /bin/bash
+      register: svc_ip_out
+      changed_when: false
+      failed_when: false
+      when: svc_prefix_awk != ''
+
+    - name: Detect svc interface name
+      ansible.builtin.shell: |-
+        ip -o -4 addr show scope global |
+        awk '$2!="lo" && $4 ~ /^{{ svc_prefix_awk }}\./ {print $2; exit}'
+      args:
+        executable: /bin/bash
+      register: svc_if_out
+      changed_when: false
+      failed_when: false
+      when: svc_prefix_awk != ''
+
+    - name: Show FRR version
+      ansible.builtin.command:
+        argv: ["vtysh", "-c", "show version"]
+      register: frr_version
+      changed_when: false
+
+    - name: Show BGP summary
+      ansible.builtin.command:
+        argv: ["vtysh", "-c", "show ip bgp summary"]
+      register: bgp_summary
+      failed_when: false
+      changed_when: false
+
+    - name: Show BGP summary (JSON)
+      ansible.builtin.command:
+        argv: ["vtysh", "-c", "show ip bgp summary json"]
+      register: bgp_summary_json
+      failed_when: false
+      changed_when: false
+
+    - name: Show interfaces brief (link/protocol state)
+      ansible.builtin.command:
+        argv: ["vtysh", "-c", "show interface brief"]
+      register: if_brief
+      failed_when: false
+      changed_when: false
+
+    - name: Show interfaces (JSON)
+      ansible.builtin.command:
+        argv: ["vtysh", "-c", "show interface json"]
+      register: if_json
+      failed_when: false
+      changed_when: false
+
+    - name: Show IP route (JSON)
+      ansible.builtin.command:
+        argv: ["vtysh", "-c", "show ip route json"]
+      register: ip_route_json
+      failed_when: false
+      changed_when: false
+
+    - name: Ensure route debug output directory exists (controller mount)
+      ansible.builtin.file:
+        path: /work/out/routes
+        state: directory
+        mode: "0755"
+
+    - name: Save raw route JSON for debug
+      ansible.builtin.copy:
+        content: "{{ ip_route_json.stdout | default('') }}\n"
+        dest: "/work/out/routes/{{ inventory_hostname | regex_replace('\n','_') }}.json"
+        mode: "0644"
+      when: ip_route_json.stdout is defined
+
+    - name: Read link state for mgmt/svc interfaces
+      ansible.builtin.shell: |-
+        for dev in {{ (mgmt_if_out.stdout | default('')) }} {{ (svc_if_out.stdout | default('')) }}; do
+          if [ -n "$dev" ]; then ip -o link show dev "$dev"; fi;
+        done
+      args:
+        executable: /bin/bash
+      register: if_links
+      changed_when: false
+      failed_when: false
+
+    - name: Persist FRR opdata as host facts
+      ansible.builtin.set_fact:
+        mgmt_ipv4: "{{ (mgmt_ip_out.stdout | default('')).split('\n')[0] }}"
+        svc_ipv4: "{{ (svc_ip_out.stdout | default('')).split('\n')[0] }}"
+        mgmt_if_name: "{{ (mgmt_if_out.stdout | default('')).split('\n')[0] }}"
+        svc_if_name: "{{ (svc_if_out.stdout | default('')).split('\n')[0] }}"
+        frr_version_txt: "{{ frr_version.stdout | default('') }}"
+        bgp_summary_txt: "{{ bgp_summary.stdout | default('') }}"
+        interfaces_brief_txt: "{{ if_brief.stdout | default('') }}"
+        if_links_txt: "{{ if_links.stdout | default('') }}"
+
+    - name: Parse BGP summary JSON when available
+      ansible.builtin.set_fact:
+        bgp_summary_parsed: "{{ bgp_summary_json.stdout | from_json }}"
+      when: (bgp_summary_json.stdout | default('')) is match('^\s*\{')
+
+    - name: Parse interface JSON when available
+      ansible.builtin.set_fact:
+        interfaces_json_parsed: "{{ if_json.stdout | from_json }}"
+      when: (if_json.stdout | default('')) is match('^\s*\{')
+
+    - name: Parse route JSON when available
+      ansible.builtin.set_fact:
+        ip_route_parsed: "{{ ip_route_json.stdout | from_json }}"
+      when: (ip_route_json.stdout | default('')) is match('^\s*\{')
+
+    - name: Derive protocol state per plane
+      ansible.builtin.set_fact:
+        mgmt_proto_state: "{{ (interfaces_json_parsed.get(mgmt_if_name, {}).get('lineProtocol') | default('unknown')) if (interfaces_json_parsed is defined and (mgmt_if_name | default('')) != '') else 'unknown' }}"
+        svc_proto_state: "{{ (interfaces_json_parsed.get(svc_if_name, {}).get('lineProtocol') | default('unknown')) if (interfaces_json_parsed is defined and (svc_if_name | default('')) != '') else 'unknown' }}"
+
+- name: Collect Bridge operational data
+  hosts: linux_bridge
+  gather_facts: false
+  tasks:
+    - name: Compute mgmt regex prefix
+      ansible.builtin.set_fact:
+        mgmt_prefix_awk: "{{ (mgmt_subnet.split('/') | first).rsplit('.', 1)[0] | replace('.', '\\.') if (mgmt_subnet is defined and mgmt_subnet != '') else '' }}"
+
+    - name: Detect mgmt IPv4
+      ansible.builtin.shell: |-
+        ip -o -4 addr show scope global |
+        awk '$2!="lo" && $4 ~ /^{{ mgmt_prefix_awk }}\./ {print $4; exit}'
+      args:
+        executable: /bin/bash
+      register: mgmt_ip_out
+      changed_when: false
+      failed_when: false
+      when: mgmt_prefix_awk != ''
+
+    - name: Show bridge links
+      ansible.builtin.command:
+        argv: ["bridge", "link"]
+      register: bridge_link
+      changed_when: false
+
+    - name: Show bridge devices (detailed)
+      ansible.builtin.command:
+        argv: ["ip", "-d", "link", "show", "type", "bridge"]
+      register: bridge_detail
+      failed_when: false
+      changed_when: false
+
+    - name: Persist Bridge opdata as host facts
+      ansible.builtin.set_fact:
+        mgmt_ipv4: "{{ (mgmt_ip_out.stdout | default('')).split('\n')[0] }}"
+        bridge_link_txt: "{{ bridge_link.stdout | default('') }}"
+        bridge_detail_txt: "{{ bridge_detail.stdout | default('') }}"
+
+- name: Aggregate and export operational data
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Select export template and destination
+      ansible.builtin.set_fact:
+        _ops_template: >-
+          {{
+            '/work/templates/ops.ietf.json.j2' if (format | default('raw')) == 'ietf' else
+            '/work/templates/ops.jsonl.j2'      if (format | default('raw')) == 'jsonl' else
+            '/work/templates/ops.json.j2'
+          }}
+        _ops_dest: "{{ (dest_path | default('')) or (
+            '/work/output/ops_ietf.json' if (format | default('raw')) == 'ietf' else
+            '/work/output/objects.jsonl'  if (format | default('raw')) == 'jsonl' else
+            '/work/output/ops.json'
+          ) }}"
+
+    - name: Ensure output directory exists
+      ansible.builtin.file:
+        path: "{{ _ops_dest | regex_replace('^(.*)/[^/]+$', '\\1') }}"
+        state: directory
+        mode: "0755"
+
+    - name: Render ops JSON
+      ansible.builtin.template:
+        src: "{{ _ops_template }}"
+        dest: "{{ _ops_dest }}"
+        mode: "0644"

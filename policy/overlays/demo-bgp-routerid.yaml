@@ -1,0 +1,6 @@
+ietf-network:networks:
+  operational:
+    bgp:
+      router_id:
+        r1: 192.168.0.101
+

@@ -1,0 +1,24 @@
+services:
+  mcp:
+    build:
+      context: .
+      dockerfile: Dockerfile.mcp
+    ports:
+      - "9000:9000"
+    environment:
+      - MCP_TOKEN=${MCP_TOKEN:-secret123}
+      - MCP_ALLOW=${MCP_ALLOW:-playbooks/*.yml}
+      - MCP_WORKDIR=${MCP_WORKDIR:-/app}
+    volumes:
+      - ./playbooks:/app/playbooks:ro
+      - ./inventory.ini:/app/inventory.ini:ro   # ← 正解
+      - ./:/app:cached
+      - ./logs:/app/logs
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9000/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    restart: unless-stopped
+    command: uvicorn mcp_http:app --host 0.0.0.0 --port 9000

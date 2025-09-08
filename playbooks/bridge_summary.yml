@@ -1,0 +1,24 @@
+---
+- name: Switch (Linux bridge) summary
+  hosts: switches
+  gather_facts: false
+  tasks:
+    - name: Show bridges
+      command: bash -lc "bridge -json link show || bridge link"
+      register: br
+      changed_when: false
+      failed_when: false
+
+    - name: VLANs on bridge
+      command: bash -lc "bridge vlan show"
+      register: vlan
+      changed_when: false
+      failed_when: false
+
+    - name: Show results
+      debug:
+        msg: |
+          === {{ inventory_hostname }} ===
+          {{ br.stdout }}
+          -----------------------------
+          {{ vlan.stdout }}

@@ -1,0 +1,24 @@
+---
+- name: Router summary (FRR)
+  hosts: routers
+  gather_facts: false
+  tasks:
+    - name: FRR version
+      command: vtysh -c "show version"
+      register: ver
+      changed_when: false
+      failed_when: false
+
+    - name: Interface brief
+      command: vtysh -c "show interface brief"
+      register: ifs
+      changed_when: false
+      failed_when: false
+
+    - name: Show results
+      debug:
+        msg: |
+          === {{ inventory_hostname }} ===
+          {{ ver.stdout | default('vtysh not available') }}
+          -----------------------------
+          {{ ifs.stdout | default('no interface info') }}

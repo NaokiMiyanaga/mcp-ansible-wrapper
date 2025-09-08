@@ -1,0 +1,8 @@
+
+fastapi
+uvicorn[standard]
+ansible
+PyYAML
+jsonschema
+openai
+httpx
