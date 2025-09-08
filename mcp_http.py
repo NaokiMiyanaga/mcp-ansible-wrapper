@@ -1,189 +1,184 @@
-import os
-import fnmatch
-import subprocess
-import json
-import time
-from pathlib import Path
-from datetime import datetime
-from typing import Optional, List
+# mcp_http.py — FastAPI app for MCP Ansible wrapper
+from fastapi import FastAPI, Request, Header
+from pydantic import BaseModel, Field
+from typing import Optional, Dict, List
+import os, json, time, datetime, pathlib, subprocess, shlex, fnmatch
 
-from fastapi import FastAPI, HTTPException, Query
-from pydantic import BaseModel
+# ----------------------
+# Globals & helpers
+# ----------------------
+app = FastAPI(title="MCP Ansible Wrapper", version="1.0.0")
 
-# -----------------------------------------------------------------------------
-# FastAPI app
-# -----------------------------------------------------------------------------
-APP = FastAPI(title="MCP Ansible Wrapper", version="1.0.0")
-app = APP  # uvicorn mcp_http:app でも mcp_http:APP でもOKにするため
-
-# -----------------------------------------------------------------------------
-# Config / Paths
-# -----------------------------------------------------------------------------
-BASE_DIR = Path(os.getenv("MCP_WORKDIR", "/app")).resolve()
-MCP_TOKEN = os.getenv("MCP_TOKEN", "secret123")
-
-# 許可パターン（スペース or カンマ区切り対応）
-_raw = os.getenv("MCP_ALLOW", "playbooks/*.yml")
-ALLOW_PATTERNS = [p.strip() for p in _raw.replace(",", " ").split() if p.strip()]
-
-LOG_DIR = (BASE_DIR / "logs")
+BASE_DIR   = pathlib.Path(os.getenv("MCP_WORKDIR", "/app")).resolve()
+LOG_DIR    = BASE_DIR / "logs"
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 
-# 起動単位で1ファイルのJSONLにまとめる（tailしやすくする）
-SESSION_TS = datetime.now().strftime("%Y%m%d-%H%M%S")
-SESSION_FILE = LOG_DIR / f"session-{SESSION_TS}.jsonl"
+def _now_iso():
+    return datetime.datetime.now().isoformat(timespec="seconds")
 
-# -----------------------------------------------------------------------------
-# Utilities
-# -----------------------------------------------------------------------------
-def _safe_json_dumps(obj) -> str:
+def _parse_allow(raw: Optional[str]) -> List[str]:
+    """Allow patterns: supports comma or whitespace separated (e.g. 'playbooks/*.yml,*.yml')."""
+    raw = (raw or "playbooks/*.yml")
+    items = []
+    for tok in raw.replace(",", " ").split():
+        tok = tok.strip()
+        if tok:
+            items.append(tok)
+    return items
+
+def _allowed(playbook: str, patterns: List[str]) -> bool:
+    # normalize relative paths (no absolute allowed)
+    p = playbook.lstrip("./")
+    return any(fnmatch.fnmatch(p, pat) for pat in patterns)
+
+def _log(event: str, data: Dict):
     try:
-        return json.dumps(obj, ensure_ascii=False)
+        fname = LOG_DIR / f"session-{datetime.datetime.now():%Y%m%d-%H%M%S}.jsonl"
+        rec = {"ts": _now_iso(), "event": event, **(data or {})}
+        with fname.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
     except Exception as e:
-        return json.dumps({"_nonserializable": str(obj), "_error": str(e)})
+        # logging must not crash the server
+        print("[log-error]", e)
 
-def _log(kind: str, payload: dict):
-    # ログの失敗で /health を巻き添えにしない
-    try:
-        LOG_DIR.mkdir(parents=True, exist_ok=True)
-        with open(SESSION_FILE, "a") as f:
-            f.write(_safe_json_dumps({
-                "ts": datetime.now().isoformat(timespec="seconds"),
-                "kind": kind,
-                "payload": payload
-            }) + "\n")
-    except Exception as e:
-        # どうしても書けない場合は捨てる（/health を優先）
-        pass
+def _env_debug() -> bool:
+    return os.getenv("DEBUG_MODE", "1") == "1"
 
-def _to_rel_under_base(path_str: str) -> str:
-    p = Path(path_str)
-    if not p.is_absolute():
-        p = (BASE_DIR / p).resolve()
-    else:
-        p = p.resolve()
-    try:
-        rel = p.relative_to(BASE_DIR)
-    except ValueError:
-        raise HTTPException(status_code=400, detail="playbook must be under /app")
-    return rel.as_posix()
+def _env_token() -> str:
+    return os.getenv("MCP_TOKEN", "secret123")
 
-def _is_allowed(rel_path: str) -> bool:
-    return any(fnmatch.fnmatch(rel_path, pat) for pat in ALLOW_PATTERNS)
+def _env_allow() -> List[str]:
+    return _parse_allow(os.getenv("MCP_ALLOW"))
 
-# -----------------------------------------------------------------------------
+# ----------------------
 # Models
-# -----------------------------------------------------------------------------
-class RunRequest(BaseModel):
-    playbook: str
-    limit: Optional[str] = None
-    extra_vars: Optional[dict] = None
+# ----------------------
+class RunBody(BaseModel):
+    playbook: str = Field(..., description="Path to an ansible playbook (relative to /app)")
+    limit: Optional[str] = Field("all", description="Host pattern for -l/--limit")
+    extra_vars: Optional[Dict] = Field(default_factory=dict, description="Variables passed to --extra-vars")
 
-# -----------------------------------------------------------------------------
-# Health / Trace endpoints
-# -----------------------------------------------------------------------------
-@APP.get("/health")
+# ----------------------
+# Health / Debug / Refresh
+# ----------------------
+@app.get("/health")
 def health():
-    # ここは絶対に 200 を返す（内部状態に依存しない）
     return {
         "ok": True,
         "status": 200,
-        "allow": ALLOW_PATTERNS,
-        "debug": True,
-        "workdir": BASE_DIR.as_posix(),
-        "logfile": SESSION_FILE.as_posix(),
+        "workdir": str(BASE_DIR),
+        "allow": _env_allow(),
+        "debug": _env_debug()
     }
 
-@APP.get("/trace")
-def trace_all():
+@app.get("/debug")
+def debug_status():
+    return {"ok": True, "debug": _env_debug(), "allow": _env_allow()}
+
+@app.post("/debug")
+async def debug_toggle(req: Request):
+    body = {}
     try:
-        if not SESSION_FILE.exists():
-            return {"file": SESSION_FILE.as_posix(), "entries": []}
-        with open(SESSION_FILE, "r") as f:
-            lines = f.readlines()
-        entries = []
-        for line in lines:
-            try:
-                entries.append(json.loads(line))
-            except Exception:
-                entries.append({"_raw": line})
-        return {"file": SESSION_FILE.as_posix(), "entries": entries}
-    except Exception as e:
-        # traceが壊れてもサーバは生きたまま
-        return {"file": SESSION_FILE.as_posix(), "error": str(e), "entries": []}
+        body = await req.json()
+    except Exception:
+        pass
+    on = bool(body.get("on", True))
+    os.environ["DEBUG_MODE"] = "1" if on else "0"
+    _log("debug_toggle", {"on": on})
+    return {"ok": True, "debug": _env_debug()}
 
-@APP.get("/trace/tail")
-def trace_tail(lines: int = Query(200, ge=1, le=2000)):
-    try:
-        if not SESSION_FILE.exists():
-            return {"file": SESSION_FILE.as_posix(), "entries": []}
-        with open(SESSION_FILE, "r") as f:
-            buf = f.readlines()[-lines:]
-        entries = []
-        for line in buf:
-            try:
-                entries.append(json.loads(line))
-            except Exception:
-                entries.append({"_raw": line})
-        return {"file": SESSION_FILE.as_posix(), "entries": entries}
-    except Exception as e:
-        return {"file": SESSION_FILE.as_posix(), "error": str(e), "entries": []}
+@app.post("/refresh")
+def refresh():
+    # いまは環境変数の再読込だけ（プロセス再起動はしない）
+    allow = _env_allow()
+    _log("refresh", {"allow": allow, "workdir": str(BASE_DIR)})
+    return {"ok": True, "allow": allow, "workdir": str(BASE_DIR)}
 
-# -----------------------------------------------------------------------------
-# Main endpoint
-# -----------------------------------------------------------------------------
-@APP.post("/mcp/run")
-def run_playbook(body: RunRequest):
-    # 認証（必要ならここでトークン検査を入れる）
-    # 例: from fastapi import Header; pass Authorization header
-    # ただ今回は /health が落ちないように簡素に維持
-
-    rel = _to_rel_under_base(body.playbook)
-
-    if not _is_allowed(rel):
-        msg = f"playbook not allowed: {rel}"
-        _log("allow_deny", {"playbook": rel, "reason": msg, "allow": ALLOW_PATTERNS})
-        return {"ok": False, "error": msg}
-
-    # デフォルトで "all" を使う（localhost事故の防止）
-    limit = body.limit or "all"
-
-    cmd = ["ansible-playbook", (BASE_DIR / rel).as_posix()]
-    if limit:
-        cmd += ["-l", limit]
-    if body.extra_vars:
-        cmd += ["--extra-vars", json.dumps(body.extra_vars, ensure_ascii=False)]
-
-    # ansible の色コードを抑制（ログ可読性）
-    env = dict(os.environ)
-    env["ANSIBLE_FORCE_COLOR"] = "0"
-
+# ----------------------
+# /mcp/run — main entry
+# ----------------------
+@app.post("/mcp/run")
+def mcp_run(payload: RunBody,
+            authorization: Optional[str] = Header(default=None)):
     t0 = time.time()
-    _log("ansible_request", {"cmd": cmd})
+
+    # Auth (Bearer)
+    expected = _env_token()
+    if expected:
+        provided = (authorization or "")
+        if not provided.startswith("Bearer "):
+            _log("auth_fail", {"reason": "no_bearer"})
+            return {"ok": False, "exit_code": 401, "stdout": "", "stderr": "Unauthorized (no bearer token)"}
+        token = provided.split(" ", 1)[1].strip()
+        if token != expected:
+            _log("auth_fail", {"reason": "token_mismatch"})
+            return {"ok": False, "exit_code": 401, "stdout": "", "stderr": "Unauthorized (token mismatch)"}
+
+    playbook = payload.playbook.strip()
+    limit    = (payload.limit or "all").strip()
+    xvars    = payload.extra_vars or {}
+
+    # Allowlist
+    allow_patterns = _env_allow()
+    if not _allowed(playbook, allow_patterns):
+        _log("allow_block", {"playbook": playbook, "allow": allow_patterns})
+        return {"ok": False, "exit_code": 400, "stdout": "",
+                "stderr": f"playbook not allowed: {playbook}"}
+
+    # Paths
+    pb_path = (BASE_DIR / playbook.lstrip("./")).resolve()
+    inv_ini = (BASE_DIR / "inventory.ini").resolve()
+    ans_cfg = (BASE_DIR / "ansible.cfg").resolve()
+
+    if not pb_path.exists():
+        _log("playbook_missing", {"path": str(pb_path)})
+        return {"ok": False, "exit_code": 2, "stdout": "", "stderr": f"playbook not found: {pb_path}"}
+    if not inv_ini.exists():
+        _log("inventory_missing", {"path": str(inv_ini)})
+        return {"ok": False, "exit_code": 2, "stdout": "", "stderr": f"inventory not found: {inv_ini}"}
+
+    # ansible-playbook command
+    cmd = [
+        "ansible-playbook",
+        str(pb_path),
+        "-i", str(inv_ini),
+        "-l", limit or "all",
+        "-e", json.dumps(xvars, ensure_ascii=False)
+    ]
+    # Make sure we run in BASE_DIR so relative includes work
+    _log("ansible_request", {
+        "cmd": " ".join(shlex.quote(c) for c in cmd),
+        "workdir": str(BASE_DIR),
+        "extra_vars": xvars
+    })
 
     try:
-        p = subprocess.run(
-            cmd, cwd=str(BASE_DIR),
-            capture_output=True, text=True,
-            timeout=180, env=env
+        proc = subprocess.run(
+            cmd,
+            cwd=str(BASE_DIR),
+            capture_output=True,
+            text=True
         )
-        res = {
-            "ok": p.returncode == 0,
-            "exit_code": p.returncode,
-            "stdout": p.stdout,
-            "stderr": p.stderr,
-            "elapsed_sec": round(time.time() - t0, 3)
-        }
+        dt = time.time() - t0
+        out = proc.stdout or ""
+        err = proc.stderr or ""
         _log("ansible_result", {
-            "code": p.returncode,
-            "stdout_head": p.stdout[:2000],
-            "stderr_head": p.stderr[:1000]
+            "exit_code": proc.returncode,
+            "elapsed_sec": round(dt, 3),
+            "stdout_tail": out[-2000:],  # 過大なログは末尾だけ
+            "stderr_tail": err[-2000:]
         })
-        return res
-
-    except subprocess.TimeoutExpired:
-        _log("ansible_timeout", {"cmd": cmd})
-        raise HTTPException(status_code=504, detail="ansible-playbook timeout")
+        return {
+            "ok": (proc.returncode == 0),
+            "exit_code": proc.returncode,
+            "stdout": out,
+            "stderr": err,
+            "elapsed_sec": dt
+        }
+    except FileNotFoundError as e:
+        # ansible-playbook が無い
+        _log("ansible_error", {"error": str(e)})
+        return {"ok": False, "exit_code": 127, "stdout": "", "stderr": "ansible-playbook not found"}
     except Exception as e:
-        _log("ansible_exception", {"error": str(e)})
-        raise HTTPException(status_code=500, detail=str(e))
+        _log("ansible_error", {"error": str(e)})
+        return {"ok": False, "exit_code": 1, "stdout": "", "stderr": str(e)}

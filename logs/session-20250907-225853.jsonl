@@ -1,6 +1,0 @@
-{"ts": "2025-09-07T22:59:07.209308", "event": "request", "payload": {"path": "/mcp/run", "method": "POST", "body": "{\"playbook\":\"network_configuration.yml\",\"limit\":\"localhost\"}"}}
-{"ts": "2025-09-07T22:59:07.211210", "event": "response", "payload": {"status": 200, "body": "{\"ok\":false,\"error\":\"playbook not allowed: network_configuration.yml\"}"}}
-{"ts": "2025-09-07T23:00:21.293368", "event": "request", "payload": {"path": "/mcp/run", "method": "POST", "body": "{\"playbook\":\"network_overview.yml\",\"limit\":\"r1\"}"}}
-{"ts": "2025-09-07T23:00:21.297012", "event": "response", "payload": {"status": 200, "body": "{\"ok\":false,\"error\":\"playbook not allowed: network_overview.yml\"}"}}
-{"ts": "2025-09-07T23:01:27.669844", "event": "request", "payload": {"path": "/mcp/run", "method": "POST", "body": "{\"playbook\":\"router_config.yml\",\"limit\":\"test_router\"}"}}
-{"ts": "2025-09-07T23:01:27.674537", "event": "response", "payload": {"status": 200, "body": "{\"ok\":false,\"error\":\"playbook not allowed: router_config.yml\"}"}}
