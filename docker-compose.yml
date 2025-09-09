@@ -15,9 +15,9 @@ services:
       OPENAI_MODEL_PLAN: gpt-4o-mini
       OPENAI_MODEL_SUM: gpt-4o-mini
       ANSIBLE_RUN: exec
-      ANSIBLE_BIN: /usr/bin/ansible-playbook
+      ANSIBLE_BIN: /usr/local/bin/ansible-playbook 
     volumes:
-      - ./playbooks:/app/playbooks:ro
+      - ./playbooks:/app/playbooks:rw
       - ./inventory.ini:/app/inventory.ini:ro   # ← 正解
       - ./logs:/app/logs
       - ./mcp_http.py:/app/mcp_http.py:ro   # ★これを追加

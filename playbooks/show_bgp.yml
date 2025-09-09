@@ -1,0 +1,12 @@
+---
+# Auto-scaffolded at 2025-09-10T01:12:19.437482+09:00
+# Purpose : bgp status/ops
+# Hint    : fill tasks to query device r1
+# Context : user said -> r1のBGPの状態は？
+- name: bgp ops for r1
+  hosts: all
+  gather_facts: no
+  tasks:
+    - name: TODO implement bgp tasks
+      debug:
+        msg: "scaffold for bgp on r1"
