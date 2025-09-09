@@ -1,0 +1,11 @@
+# --- secrets & env files ---
+.env
+*.env
+
+# プロジェクト直下の mcp-ansible-wrapper.env も無視
+mcp-ansible-wrapper.env
+
+# ログやキャッシュ
+logs/
+__pycache__/
+*.pyc

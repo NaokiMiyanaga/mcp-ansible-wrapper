@@ -45,6 +45,13 @@ ALLOW_PLAYBOOK_CREATE = os.environ.get("ALLOW_PLAYBOOK_CREATE","1") not in ("0",
 def _jst_now_iso() -> str:
     return datetime.now(JST).isoformat()
 
+
+
+def _hash8(v: str) -> str:
+    try:
+        return hashlib.sha256((v or "").encode("utf-8")).hexdigest()[:8]
+    except Exception:
+        return ""
 def log_event(no: int, actor: str, content: Any, tag: str) -> None:
     rec = {
         "ts_jst": _jst_now_iso(),
@@ -58,8 +65,33 @@ def log_event(no: int, actor: str, content: Any, tag: str) -> None:
         with open(AUDIT_PATH, "a", encoding="utf-8") as f:
             f.write(line + "\n")
 
+AUTH_DEBUG = os.environ.get("AUTH_DEBUG", "0").lower() in ("1","true","yes")
+REQUIRE_AUTH = os.environ.get("REQUIRE_AUTH", "1").lower() not in ("0","false","no")
 app = FastAPI(title="MCP")
 
+
+
+def _auth(request: Request):
+    """Return JSONResponse on failure, None on success."""
+    if not REQUIRE_AUTH:
+        return None
+    auth = request.headers.get("authorization")
+    if not auth or not auth.lower().startswith("bearer "):
+        if AUTH_DEBUG:
+            log_event(11, "mcp", {"ok": False, "intent": "auth_error", "reason": "missing bearer token", "expected_hash": _hash8(os.environ.get("MCP_TOKEN","")), "ts_jst": _jst_now_iso()}, "mcp reply")
+        from fastapi.responses import JSONResponse
+        return JSONResponse(status_code=401, content={"ok": False, "error": "missing bearer token"})
+    token = auth.split(" ", 1)[1]
+    expected = os.environ.get("MCP_TOKEN", "")
+    if token != expected:
+        if AUTH_DEBUG:
+            log_event(11, "mcp", {"ok": False, "intent": "auth_error", "reason": "invalid token", "provided_hash": _hash8(token), "expected_hash": _hash8(expected), "ts_jst": _jst_now_iso()}, "mcp reply")
+        from fastapi.responses import JSONResponse
+        body = {"ok": False, "error": "invalid token"}
+        if AUTH_DEBUG:
+            body["debug"] = {"provided_hash": _hash8(token), "expected_hash": _hash8(expected)}
+        return JSONResponse(status_code=403, content=body)
+    return None
 class RunPayload(BaseModel):
     text: Optional[str] = None
     decision: Optional[str] = None
@@ -233,6 +265,9 @@ def health():
 
 @app.post("/run")
 async def run(payload: RunPayload, request: Request):
+    bad = _auth(request)
+    if bad is not None:
+        return bad
     # 6) request
     log_event(6, "mcp", payload.dict(), "mcp request")
 
@@ -325,3 +360,9 @@ async def run(payload: RunPayload, request: Request):
 
     log_event(11, "mcp", reply, "mcp reply")
     return reply
+
+
+@app.get("/whoami")
+def whoami():
+    expect = os.environ.get("MCP_TOKEN", "")
+    return {"ok": True, "expect_token_hash": _hash8(expect), "ts_jst": _jst_now_iso()}
