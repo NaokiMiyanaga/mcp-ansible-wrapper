@@ -1,111 +1,75 @@
-# latest mcp_http.py content placeholder
+# -*- coding: utf-8 -*-
+"""
+Minimal MCP FastAPI app with unified JSONL event logging (JST) and dated filenames.
 
+File naming (host):
+- /Users/naoki/devNet/mcp-ansible-wrapper/logs/mcp_events_20250909-202429.jsonl
 
-# ===== SAFE PATCH BEGIN (idempotent) =====
-try:
-    app
-except NameError:
-    try:
-        from fastapi import FastAPI
-        app = FastAPI(title="MCP Service")
-    except Exception as _e:
-        from fastapi import FastAPI
-        app = FastAPI(title="MCP Service")
+Container path:
+- /app/logs/mcp_events_20250909-202429.jsonl  (assuming ./logs is mounted to /app/logs)
+"""
+import os
+import json
+import pathlib
+from typing import Any, Dict, Optional
+from datetime import datetime, timezone, timedelta
 
-# Reuse APP if present
-try:
-    if 'APP' in globals() and 'app' not in globals():
-        app = APP
-except Exception:
-    pass
+from fastapi import FastAPI, Request
+from pydantic import BaseModel
 
-def __mcp_safe_register_routes(_app):
-    from fastapi import APIRouter
-    r = APIRouter()
+# ===== Unified JSONL event logger (MCP) =====
+JST = timezone(timedelta(hours=9))
+RUN_TS = "20250909-202429"  # fixed at process start
+LOG_DIR = os.environ.get("LOG_DIR", "/app/logs")
+pathlib.Path(LOG_DIR).mkdir(parents=True, exist_ok=True)
+AUDIT_PATH = os.path.join(LOG_DIR, f"mcp_events_{RUN_TS}.jsonl")
 
-    @r.get("/health")
-    async def _health():
-        return {"ok": True}
+def _jst_now_iso() -> str:
+    return datetime.now(JST).isoformat()
 
-    @r.get("/")
-    async def _root():
-        return {"ok": True, "service": "mcp"}
+def log_event(no: int, actor: str, content: Any, tag: str) -> None:
+    rec = {
+        "ts_jst": _jst_now_iso(),
+        "no": int(no),
+        "actor": actor,
+        "content": content,
+        "tag": tag,
+    }
+    with open(AUDIT_PATH, "a", encoding="utf-8") as f:
+        f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+# ===== /logger =====
 
-    _app.include_router(r)
+app = FastAPI()
 
-try:
-    __mcp_safe_register_routes(app)
-except Exception as _e:
-    from fastapi import FastAPI
-    app = FastAPI(title="MCP Service")
-    __mcp_safe_register_routes(app)
-# ===== SAFE PATCH END =====
+class RunPayload(BaseModel):
+    text: Optional[str] = None
+    decision: Optional[str] = None
+    extra: Optional[Dict[str, Any]] = None
 
-# ===== SAFE PATCH BEGIN =====
-try:
-    app  # reuse if it exists
-except NameError:
-    from fastapi import FastAPI
-    app = FastAPI(title="MCP Service")
+@app.get("/health")
+def health():
+    return {"ok": True, "ts_jst": _jst_now_iso()}
 
-def __mcp_safe_register_routes(_app):
-    from fastapi import APIRouter
-    r = APIRouter()
-    @r.get("/health")
-    async def _health(): return {"ok": True}
-    @r.get("/")
-    async def _root(): return {"ok": True, "service": "mcp"}
-    _app.include_router(r)
+@app.post("/run")
+async def run(payload: RunPayload, request: Request):
+    # 5) mcp request: received from chainlit
+    log_event(5, "mcp", payload.dict(), "mcp request")
 
-try:
-    __mcp_safe_register_routes(app)
-except Exception:
-    from fastapi import FastAPI
-    app = FastAPI(title="MCP Service")
-    __mcp_safe_register_routes(app)
-# ===== SAFE PATCH END =====
-# ===== MCP SAFE MINIMAL PATCH (idempotent, non-invasive) =====
-# This block only ensures that:
-#  - a FastAPI `app` object exists (reusing APP/application if present)
-#  - GET /health and GET / routes exist (created only if missing)
-# Nothing else is modified.
-try:
-    from fastapi import FastAPI
-except Exception:  # FastAPI not installed or import error
-    FastAPI = None  # type: ignore
+    # 6) mcp gpt input: construct prompt for GPT (placeholder)
+    gpt_input = {"prompt": (payload.text or "").strip(), "decision": payload.decision}
+    log_event(6, "mcp", gpt_input, "mcp gpt input")
 
-def _ensure_app():
-    glb = globals()
-    # Prefer an existing object if present
-    for name in ("app", "APP", "application"):
-        if name in glb and glb[name] is not None:
-            return glb.get("app") or glb[name]
-    # Create only if FastAPI is available
-    if FastAPI is not None:
-        return FastAPI(title="MCP Service")
-    # As a last resort, defer (caller must provide app)
-    return None
+    # 7) mcp gpt output: stubbed GPT response (replace with real call)
+    gpt_output = {"summary": (payload.text or "")[:200], "decision": payload.decision or "pass"}
+    log_event(7, "mcp", gpt_output, "mcp gpt output")
 
-app = _ensure_app()  # type: ignore
-
-def _has_route(_app, path:str, method:str="GET")->bool:
-    try:
-        for r in getattr(_app, "routes", []):
-            if getattr(r, "path", None) == path and method.upper() in getattr(r, "methods", set()):
-                return True
-    except Exception:
-        pass
-    return False
-
-# Only register when we actually have an app and the route is missing
-if app is not None:
-    if not _has_route(app, "/health", "GET"):
-        @app.get("/health")
-        async def __mcp_health():
-            return {"ok": True}
-    if not _has_route(app, "/", "GET"):
-        @app.get("/")
-        async def __mcp_root():
-            return {"ok": True, "service": "mcp"}
-# ===== END MCP SAFE MINIMAL PATCH =====
-
+    # 8) mcp reply: final reply produced by MCP
+    reply = {
+        "ok": True,
+        "echo": payload.text,
+        "decision": gpt_output["decision"],
+        "summary": gpt_output["summary"],
+        "ts_jst": _jst_now_iso()
+    }
+    log_event(8, "mcp", reply, "mcp reply")
+    return reply
