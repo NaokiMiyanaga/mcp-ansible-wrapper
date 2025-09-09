@@ -1,19 +1,16 @@
-
-# Dockerfile.mcp (drop-in)
 FROM python:3.11-slim
 
 WORKDIR /app
 COPY . /app
-
 RUN pip install --no-cache-dir -r /app/requirements.txt
 
-ENV BASE_DIR=/app
-ENV MCP_TOKEN=secret123
-ENV MCP_ALLOW="playbooks/*.yml"
-# optional
-# ENV OPENAI_API_KEY=
-# ENV OPENAI_MODEL=gpt-4o-mini
-# ENV RULES_DB=/app/rules.db
-
+ENV LOG_DIR=/app/logs
+RUN mkdir -p $LOG_DIR
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl ca-certificates iproute2 \
+ && rm -rf /var/lib/apt/lists/*
+ 
 EXPOSE 9000
-CMD ["uvicorn", "mcp_http:app", "--host", "0.0.0.0", "--port", "9000"]
+
+# IMPORTANT: single CMD only. Do NOT append shell commands after this.
+CMD ["uvicorn","mcp_http:app","--host","0.0.0.0","--port","9000","--access-log","--log-level","info"]

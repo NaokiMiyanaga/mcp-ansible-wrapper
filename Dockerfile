@@ -13,3 +13,5 @@ ENV PATH="/root/.local/bin:${PATH}"
 
 ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["bash"]
+
+uvicorn mcp_http:app --host 0.0.0.0 --port 9000 --proxy-headers --access-log --log-level info

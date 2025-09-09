@@ -3,25 +3,45 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.mcp
+    container_name: mcp
     ports:
       - "9000:9000"
     environment:
       - MCP_TOKEN=${MCP_TOKEN:-secret123}
       - MCP_ALLOW=${MCP_ALLOW:-playbooks/*.yml}
       - MCP_WORKDIR=${MCP_WORKDIR:-/app}
+      - LOG_DIR="/app/logs"
+      - LOG_JSONL="1"
     volumes:
       - ./playbooks:/app/playbooks:ro
       - ./inventory.ini:/app/inventory.ini:ro   # ← 正解
       - ./:/app:cached
       - ./logs:/app/logs
-    healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:9000/health"]
-      interval: 10s
-      timeout: 3s
-      retries: 3
-      start_period: 5s
+      - ./mcp_http.py:/app/mcp_http.py:ro   # ★これを追加
     restart: unless-stopped
-    command: uvicorn mcp_http:app --host 0.0.0.0 --port 9000
+    command: [
+      "uvicorn","mcp_http:app",
+      "--host","0.0.0.0",
+      "--port","9000",
+      "--proxy-headers",
+      "--forwarded-allow-ips","*",
+      "--access-log",
+      "--log-level","info"
+    ]
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:9000/health"]
+      interval: 10s
+      timeout: 2s
+      retries: 5
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    tmpfs:
+      - /var/log
+      - /tmp
+      - /var/tmp
     networks: [mgmtnet]
+networks: { mgmtnet: { } }
 
-networks: { mgmtnet: { external: true } }
