@@ -7,15 +7,14 @@ services:
     ports:
       - "9000:9000"
     environment:
-      - MCP_TOKEN=${MCP_TOKEN:-secret123}
-      - MCP_ALLOW=${MCP_ALLOW:-playbooks/*.yml}
-      - MCP_WORKDIR=${MCP_WORKDIR:-/app}
-      - LOG_DIR="/app/logs"
-      - LOG_JSONL="1"
+      MCP_TOKEN: ${MCP_TOKEN:-secret123}
+      MCP_ALLOW: ${MCP_ALLOW:-playbooks/*.yml}
+      MCP_WORKDIR: ${MCP_WORKDIR:-/app}
+      LOG_DIR: /app/logs
+      LOG_JSONL: "1"
     volumes:
       - ./playbooks:/app/playbooks:ro
       - ./inventory.ini:/app/inventory.ini:ro   # ← 正解
-      - ./:/app:cached
       - ./logs:/app/logs
       - ./mcp_http.py:/app/mcp_http.py:ro   # ★これを追加
     restart: unless-stopped
@@ -33,6 +32,7 @@ services:
       interval: 10s
       timeout: 2s
       retries: 5
+      start_period: 10s   # ← これを追加
     logging:
       driver: json-file
       options:
@@ -43,5 +43,7 @@ services:
       - /tmp
       - /var/tmp
     networks: [mgmtnet]
-networks: { mgmtnet: { } }
+networks:
+  mgmtnet:
+    external: true
 
