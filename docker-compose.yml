@@ -12,6 +12,10 @@ services:
       MCP_WORKDIR: ${MCP_WORKDIR:-/app}
       LOG_DIR: /app/logs
       LOG_JSONL: "1"
+      OPENAI_MODEL_PLAN: gpt-4o-mini
+      OPENAI_MODEL_SUM: gpt-4o-mini
+      ANSIBLE_RUN: exec
+      ANSIBLE_BIN: /usr/bin/ansible-playbook
     volumes:
       - ./playbooks:/app/playbooks:ro
       - ./inventory.ini:/app/inventory.ini:ro   # ← 正解
