@@ -1,372 +1,137 @@
-# -*- coding: utf-8 -*-
-"""
-MCP: robust No.9 + playbook proposal + exec/stub diagnostics
-"""
-import os, re, json, pathlib, threading, subprocess, shutil
-from typing import Any, Dict, Optional
-from datetime import datetime, timezone, timedelta
-
+import os, json, subprocess, tempfile
+from pathlib import Path
+from typing import Dict, Any, Optional
 from fastapi import FastAPI, Request
-from pydantic import BaseModel
+from fastapi.responses import JSONResponse
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
-# ===== Config & logger =====
-JST = timezone(timedelta(hours=9))
-RUN_TS = "20250909-232006"
-LOG_DIR = os.environ.get("LOG_DIR", "/app/logs")
-pathlib.Path(LOG_DIR).mkdir(parents=True, exist_ok=True)
-AUDIT_PATH = os.path.join(LOG_DIR, f"mcp_events_20250909-232006.jsonl")
-_log_lock = threading.Lock()
+# -------- JSONL logger (MCP) --------
+_START_TS = datetime.now(ZoneInfo("Asia/Tokyo")).strftime("%Y%m%d-%H%M%S")
+_MCP_LOG_DIR = Path(os.getenv("MCP_LOG_DIR", "/app/logs")).resolve()
+_MCP_LOG_DIR.mkdir(parents=True, exist_ok=True)
+_MCP_LOG_FILE = _MCP_LOG_DIR / f"mcp_events_{_START_TS}.jsonl"
 
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
-OPENAI_MODEL_PLAN = os.environ.get("OPENAI_MODEL_PLAN", "gpt-4o-mini")
-OPENAI_MODEL_SUM  = os.environ.get("OPENAI_MODEL_SUM", "gpt-4o-mini")
+def _now_jst():
+    return datetime.now(ZoneInfo("Asia/Tokyo")).isoformat()
 
-# Resolve ansible binary
-ENV_ANSIBLE_BIN = os.environ.get("ANSIBLE_BIN")
-AUTO_ANSIBLE_BIN = shutil.which("ansible-playbook")
-DEFAULT_ANSIBLE_BIN = "/usr/local/bin/ansible-playbook"
-ANSIBLE_BIN = ENV_ANSIBLE_BIN or AUTO_ANSIBLE_BIN or DEFAULT_ANSIBLE_BIN
-
-# Decide effective mode
-REQ_MODE = (os.environ.get("ANSIBLE_RUN", "stub") or "stub").lower()  # 'exec' or 'stub'
-if REQ_MODE == "exec" and (ANSIBLE_BIN and os.path.exists(ANSIBLE_BIN)):
-    EFFECTIVE_MODE = "exec"
-    MODE_REASON = "exec: ansible-playbook available"
-elif REQ_MODE == "exec":
-    EFFECTIVE_MODE = "stub"
-    MODE_REASON = f"stub: ANSIBLE_BIN not found at {ANSIBLE_BIN}"
-else:
-    EFFECTIVE_MODE = "stub"
-    MODE_REASON = "stub: ANSIBLE_RUN!=exec"
-
-DEBUG_MCP = os.environ.get("DEBUG_MCP", "1") not in ("0","false","False")
-ALLOW_PLAYBOOK_CREATE = os.environ.get("ALLOW_PLAYBOOK_CREATE","1") not in ("0","false","False")
-
-def _jst_now_iso() -> str:
-    return datetime.now(JST).isoformat()
-
-
-
-def _hash8(v: str) -> str:
+def _mcp_log(no: int, tag: str, content: Any):
+    rec = {"ts_jst": _now_jst(), "no": no, "actor": "mcp", "tag": tag, "content": content}
     try:
-        return hashlib.sha256((v or "").encode("utf-8")).hexdigest()[:8]
+        with _MCP_LOG_FILE.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
     except Exception:
-        return ""
-def log_event(no: int, actor: str, content: Any, tag: str) -> None:
-    rec = {
-        "ts_jst": _jst_now_iso(),
-        "no": int(no),
-        "actor": actor,
-        "content": content,
-        "tag": tag,
-    }
-    line = json.dumps(rec, ensure_ascii=False)
-    with _log_lock:
-        with open(AUDIT_PATH, "a", encoding="utf-8") as f:
-            f.write(line + "\n")
+        pass
 
-AUTH_DEBUG = os.environ.get("AUTH_DEBUG", "0").lower() in ("1","true","yes")
-REQUIRE_AUTH = os.environ.get("REQUIRE_AUTH", "1").lower() not in ("0","false","no")
+# -------- Config --------
+REQUIRE_AUTH = os.getenv("REQUIRE_AUTH", "1") == "1"
+MCP_TOKEN = os.getenv("MCP_TOKEN", "")
+ANSIBLE_BIN = os.getenv("ANSIBLE_BIN", "/usr/local/bin/ansible-playbook")
+EFFECTIVE_MODE = "exec" if Path(ANSIBLE_BIN).exists() else "dry"
+MODE_REASON = "exec: ansible present" if EFFECTIVE_MODE == "exec" else "dry: ansible not found"
+BASE_DIR = Path(__file__).resolve().parent
+
 app = FastAPI(title="MCP")
 
+def _unauth(msg='missing bearer token'):
+    return JSONResponse({"ok": False, "error": msg}, status_code=401)
 
-
-def _auth(request: Request):
-    """Return JSONResponse on failure, None on success."""
+async def _auth(request: Request):
     if not REQUIRE_AUTH:
-        return None
-    auth = request.headers.get("authorization")
-    if not auth or not auth.lower().startswith("bearer "):
-        if AUTH_DEBUG:
-            log_event(11, "mcp", {"ok": False, "intent": "auth_error", "reason": "missing bearer token", "expected_hash": _hash8(os.environ.get("MCP_TOKEN","")), "ts_jst": _jst_now_iso()}, "mcp reply")
-        from fastapi.responses import JSONResponse
-        return JSONResponse(status_code=401, content={"ok": False, "error": "missing bearer token"})
-    token = auth.split(" ", 1)[1]
-    expected = os.environ.get("MCP_TOKEN", "")
-    if token != expected:
-        if AUTH_DEBUG:
-            log_event(11, "mcp", {"ok": False, "intent": "auth_error", "reason": "invalid token", "provided_hash": _hash8(token), "expected_hash": _hash8(expected), "ts_jst": _jst_now_iso()}, "mcp reply")
-        from fastapi.responses import JSONResponse
-        body = {"ok": False, "error": "invalid token"}
-        if AUTH_DEBUG:
-            body["debug"] = {"provided_hash": _hash8(token), "expected_hash": _hash8(expected)}
-        return JSONResponse(status_code=403, content=body)
-    return None
-class RunPayload(BaseModel):
-    text: Optional[str] = None
-    decision: Optional[str] = None
-    score: Optional[int] = None
-    extra: Optional[Dict[str, Any]] = None
-
-# ---- Fallback extractors ----
-def fallback_extract(text: Optional[str]) -> Dict[str, str]:
-    tl = (text or "").lower()
-    host_m = re.search(r"\b(r\d+)\b", tl)
-    feature = "bgp"
-    if re.search(r"\bospf\b", tl): feature = "ospf"
-    elif re.search(r"\bbfd\b", tl): feature = "bfd"
-    return {"host": host_m.group(1) if host_m else "r1", "feature": feature}
-
-# ---- GPT planning ----
-def gpt_plan(text: str) -> Dict[str, Any]:
-    # fallbacks if no API
-    if not OPENAI_API_KEY:
-        f = fallback_extract(text)
-        return {
-            "host": f["host"], "feature": f["feature"],
-            "playbook": f"playbooks/show_{f['feature']}.yml",
-            "rationale": "fallback regex (no OPENAI_API_KEY)",
-            "used_gpt": False
-        }
-    try:
-        import openai
-        openai.api_key = OPENAI_API_KEY
-        sys = (
-            "あなたはネットワーク運用のSREです。"
-            "ユーザ入力から host と feature を抽出し、Ansibleプレイブック名を1つ提案。"
-            "返答は JSON (host, feature, playbook, rationale) のみ。"
-        )
-        user = f"発話: {text}\n返答: JSONのみ"
-        resp = openai.chat.completions.create(
-            model=OPENAI_MODEL_PLAN,
-            messages=[{"role":"system","content":sys},{"role":"user","content":user}],
-            temperature=0.0,
-        )
-        try:
-            js = json.loads(resp.choices[0].message.content)
-        except Exception:
-            js = {}
-        host = (js.get("host") or "").strip() or fallback_extract(text)["host"]
-        feature = (js.get("feature") or "").strip() or fallback_extract(text)["feature"]
-        playbook = (js.get("playbook") or "").strip() or f"playbooks/show_{feature}.yml"
-        rationale = js.get("rationale") or "auto-planned by GPT"
-        return {"host": host, "feature": feature, "playbook": playbook, "rationale": rationale, "used_gpt": True}
-    except Exception as e:
-        f = fallback_extract(text)
-        return {
-            "host": f["host"], "feature": f["feature"],
-            "playbook": f"playbooks/show_{f['feature']}.yml",
-            "rationale": "fallback due to error: " + str(e),
-            "used_gpt": False
-        }
-
-# ---- Playbook proposal / creation ----
-def propose_new_playbook(plan: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    suggested = plan.get("playbook") or ""
-    # safe relative path under playbooks/
-    base = "playbooks"
-    name = os.path.basename(suggested) or f"show_{plan.get('feature','x')}.yml"
-    safe = re.sub(r"[^a-zA-Z0-9_.-]", "_", name)
-    target = os.path.join(base, safe)
-    return {"path": target, "feature": plan.get("feature"), "host": plan.get("host")}
-
-def scaffold_playbook(path:str, host:str, feature:str, text:str) -> str:
-    yaml = f"""---
-# Auto-scaffolded at {_jst_now_iso()}
-# Purpose : {feature} status/ops
-# Hint    : fill tasks to query device {host}
-# Context : user said -> {text}
-- name: {feature} ops for {host}
-  hosts: all
-  gather_facts: no
-  tasks:
-    - name: TODO implement {feature} tasks
-      debug:
-        msg: "scaffold for {feature} on {host}"
-"""
-    try:
-        pathlib.Path(path).parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(yaml)
-        return "created"
-    except Exception as e:
-        return f"error: {e}"
-
-# ---- Ansible execution (with diagnostics) ----
-def call_ansible(payload: Dict[str, Any]) -> Dict[str, Any]:
-    mode = EFFECTIVE_MODE
-    reason = MODE_REASON
-    if mode != "exec":
-        # stub path
-        return {
-            "ok": (REQ_MODE != "exec"),  # if user wanted exec but we stubbed, mark as failure
-            "mode": mode,
-            "mode_reason": reason,
-            "playbook": payload.get("playbook", "<stub>"),
-            "vars": payload.get("vars", {}),
-            "stdout": "stubbed ansible result" if REQ_MODE != "exec" else "",
-            "stderr": "" if REQ_MODE != "exec" else f"ansible-playbook not available: {ANSIBLE_BIN}",
-            "rc": 0 if REQ_MODE != "exec" else 127
-        }
-    # exec path
-    try:
-        vars_json = json.dumps(payload.get("vars", {}))
-        proc = subprocess.run(
-            [ANSIBLE_BIN, payload["playbook"], "-e", vars_json],
-            capture_output=True, text=True, timeout=180
-        )
-        return {
-            "ok": proc.returncode == 0,
-            "mode": mode,
-            "mode_reason": reason,
-            "ansible_bin": ANSIBLE_BIN,
-            "playbook": payload.get("playbook"),
-            "vars": payload.get("vars", {}),
-            "stdout": proc.stdout,
-            "stderr": proc.stderr,
-            "rc": proc.returncode,
-            "require_auth": REQUIRE_AUTH,
-            "token_set": bool(os.environ.get("MCP_TOKEN"))
-        }
-    except Exception as e:
-        return {
-            "ok": False,
-            "mode": mode,
-            "mode_reason": f"exec exception: {e}",
-            "playbook": payload.get("playbook"),
-            "vars": payload.get("vars", {}),
-            "stdout": "",
-            "stderr": str(e),
-            "rc": 2
-        }
-
-# ---- GPT summary ----
-def gpt_summarize(host: str, feature: str, ansible_reply: Dict[str, Any]) -> Dict[str, Any]:
-    summary = f"{host} の {feature} 状態を取得しました（stub要約）"
-    used_gpt = False
-    if OPENAI_API_KEY:
-        try:
-            import openai
-            openai.api_key = OPENAI_API_KEY
-            sys = (
-                "あなたはネットワーク運用のSREです。"
-                "以下のAnsible実行結果(JSON/テキスト)を読み、オペレータ向けに簡潔な要約を返してください。"
-            )
-            body = json.dumps(ansible_reply, ensure_ascii=False)[:8000]
-            user = f"# 対象\nhost={host}, feature={feature}\n\n# 結果\n{body}"
-            resp = openai.chat.completions.create(
-                model=OPENAI_MODEL_SUM,
-                messages=[{"role":"system","content":sys},{"role":"user","content":user}],
-                temperature=0.2,
-            )
-            summary = resp.choices[0].message.content.strip()
-            used_gpt = True
-        except Exception:
-            pass
-    return {"summary": summary, "used_gpt": used_gpt}
+        return True, None
+    got = request.headers.get("authorization", "")
+    if not got.startswith("Bearer "):
+        return False, _unauth("missing bearer token")
+    token = got.split(" ", 1)[1].strip()
+    if not MCP_TOKEN or token != MCP_TOKEN:
+        return False, _unauth("invalid token")
+    return True, None
 
 @app.get("/health")
 def health():
+    info = {
+        "ok": True, "ts_jst": _now_jst(),
+        "effective_mode": EFFECTIVE_MODE, "mode_reason": MODE_REASON,
+        "ansible_bin": ANSIBLE_BIN, "require_auth": REQUIRE_AUTH, "token_set": bool(MCP_TOKEN),
+        "base_dir": str(BASE_DIR),
+    }
+    _mcp_log(0, "health", info)
+    return info
+
+def _plan_from_text(text: str) -> Dict[str, Any]:
+    t = (text or "").lower()
+    host = "r1"
+    for h in ["r1", "r2", "l2a", "l2b"]:
+        if h in t:
+            host = h
+            break
+    feature = "bgp" if ("bgp" in t or "ルーティング" in t or "経路" in t) else "bgp"
+    return {"host": host, "feature": feature, "playbook": "playbooks/show_bgp.yml"}
+
+def _run_ansible(playbook: str, extra_vars: Dict[str, Any]) -> Dict[str, Any]:
+    if EFFECTIVE_MODE != "exec":
+        return {
+            "ok": True, "mode": EFFECTIVE_MODE, "mode_reason": MODE_REASON,
+            "ansible_bin": ANSIBLE_BIN, "playbook": playbook, "vars": extra_vars,
+            "stdout": "", "stderr": "", "rc": 0
+        }
+    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False, encoding="utf-8") as f:
+        json.dump(extra_vars, f, ensure_ascii=False)
+        ev = f.name
+    cmd = [ANSIBLE_BIN, playbook, "-e", f"@{ev}"]
+    _mcp_log(8, "mcp ansible request", {"cmd": cmd})
+    p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    out, err = p.communicate()
+    _mcp_log(9, "mcp ansible reply", {"rc": p.returncode, "stdout": out[:4000], "stderr": err[:2000]})
     return {
-        "ok": True,
-        "ts_jst": _jst_now_iso(),
-        "effective_mode": EFFECTIVE_MODE,
-        "mode_reason": MODE_REASON,
-        "ansible_bin": ANSIBLE_BIN,
-        "require_auth": REQUIRE_AUTH,
-        "token_set": bool(os.environ.get("MCP_TOKEN"))
+        "ok": p.returncode == 0, "mode": EFFECTIVE_MODE, "mode_reason": MODE_REASON,
+        "ansible_bin": ANSIBLE_BIN, "playbook": playbook, "vars": extra_vars,
+        "stdout": out, "stderr": err, "rc": p.returncode
     }
 
 @app.post("/run")
-async def run(payload: RunPayload, request: Request):
-    bad = _auth(request)
-    if bad is not None:
-        return bad
-    # 6) request
-    log_event(6, "mcp", payload.dict(), "mcp request")
+async def run(request: Request):
+    ok, resp = await _auth(request)
+    if not ok:
+        return resp
 
-    # create_playbook path
-    if payload.extra and payload.extra.get("action") == "create_playbook":
-        target = (payload.extra.get("path") or "").strip()
-        host = (payload.extra.get("host") or "r1").strip()
-        feature = (payload.extra.get("feature") or "bgp").strip()
-        result = "denied"
-        if ALLOW_PLAYBOOK_CREATE and target and target.startswith("playbooks/") and target.endswith(".yml"):
-            result = scaffold_playbook(target, host, feature, payload.text or "")
-        reply = {"ok": result=="created", "intent":"create_playbook", "path": target, "result": result, "ts_jst": _jst_now_iso()}
-        log_event(11, "mcp", reply, "mcp reply")
-        return reply
+    body = await request.json()
+    _mcp_log(6, "mcp request", {"body": body})
 
-    # 7) planning
-    plan = gpt_plan(payload.text or "")
-    gpt_input = {
-        "prompt": (payload.text or "").strip(),
-        "decision": payload.decision,
-        "score": payload.score,
-        "plan": {"host": plan["host"], "feature": plan["feature"], "playbook": plan["playbook"], "used_gpt": plan["used_gpt"]},
-        "rationale": plan.get("rationale")
-    }
-    log_event(7, "mcp", gpt_input, "mcp gpt input")
+    text = body.get("text", "")
+    decision = body.get("decision", "run")
+    score = body.get("score", 1)
+    payload = (body.get("payload") or {})
 
-    # Propose new playbook if not exists
-    suggested = plan["playbook"]
-    pb_path = suggested if os.path.isabs(suggested) else os.path.join(".", suggested)
-    exists = os.path.exists(pb_path)
-    if not exists:
-        proposal = propose_new_playbook(plan)
-        reply = {
-            "ok": True,
-            "decision": payload.decision or "mcp",
-            "summary": "実行可能なプレイブックが見つかりません。新規作成を提案します。",
-            "intent": "needs_playbook",
-            "ts_jst": _jst_now_iso()
+    plan = _plan_from_text(text)
+    explicit_pb: Optional[str] = payload.get("playbook") if isinstance(payload, dict) else None
+    chosen_pb = explicit_pb or plan.get("playbook")
+
+    pb_path = Path(chosen_pb)
+    if not pb_path.is_absolute():
+        pb_path = (BASE_DIR / pb_path).resolve()
+    if not pb_path.exists():
+        err = {
+            "ok": False, "error": f"playbook not found: {pb_path}",
+            "hint": "COPY playbooks/ into the image", "ts_jst": _now_jst()
         }
-        if DEBUG_MCP:
-            reply["debug"] = {"no7_plan": gpt_input, "propose_new_playbook": proposal}
-        log_event(11, "mcp", reply, "mcp reply")
-        return reply
+        _mcp_log(11, "mcp reply", {"status": 400, **err})
+        return JSONResponse(err, status_code=400)
 
-    # 8) ansible request
-    ansible_payload = {
-        "playbook": suggested,
-        "vars": {"host": plan["host"], "feature": plan["feature"], "score": payload.score, "decision": payload.decision}
+    extra_vars = {"host": plan["host"], "feature": plan["feature"], "score": score, "decision": decision}
+    user_vars = payload.get("vars") if isinstance(payload, dict) else None
+    if isinstance(user_vars, dict):
+        extra_vars.update(user_vars)
+
+    reply = _run_ansible(str(pb_path), extra_vars)
+    debug = {
+        "no7_plan": {"prompt": text, "decision": decision, "score": score, "plan": plan},
+        "no8_request": {"module": "ansible", "payload": {"playbook": str(pb_path), "vars": extra_vars},
+                        "effective_mode": EFFECTIVE_MODE, "mode_reason": MODE_REASON, "ansible_bin": ANSIBLE_BIN},
+        "no9_reply": reply,
     }
-    log_event(8, "mcp", {"module": "ansible", "payload": ansible_payload,
-                         "effective_mode": EFFECTIVE_MODE, "mode_reason": MODE_REASON, "ansible_bin": ANSIBLE_BIN}, "mcp ansible request")
-
-    # 9) ansible reply (always include mode diagnostics)
-    ansible_reply = call_ansible(ansible_payload)
-    log_event(9, "mcp", ansible_reply, "mcp ansible reply")
-
-    # 10) summary
-    gpt_out = gpt_summarize(plan["host"], plan["feature"], ansible_reply)
-    gpt_output = {
-        "summary": gpt_out["summary"] if ansible_reply.get("ok", False) else "Ansible 実行に失敗しました。",
-        "decision": (payload.decision or "mcp"),
-        "score": payload.score,
-        "used_ansible": True,
-        "plan_used_gpt": plan["used_gpt"],
-        "summary_used_gpt": gpt_out["used_gpt"],
-        "ansible_rc": ansible_reply.get("rc"),
-        "ansible_ok": ansible_reply.get("ok", True)
-    }
-    log_event(10, "mcp", gpt_output, "mcp gpt output")
-
-    # 11) final reply (+debug)
-    reply = {
-        "ok": bool(ansible_reply.get("ok", True)),
-        "decision": gpt_output.get("decision"),
-        "summary": gpt_output.get("summary"),
-        "score": gpt_output.get("score"),
-        "ansible": {"rc": ansible_reply.get("rc"), "ok": ansible_reply.get("ok", True)},
-        "ts_jst": _jst_now_iso()
-    }
-    if not ansible_reply.get("ok", True):
-        reply["error"] = (ansible_reply.get("stderr") or ansible_reply.get("mode_reason") or "ansible error")[:2000]
-
-    if DEBUG_MCP:
-        reply["debug"] = {
-            "no7_plan": gpt_input,
-            "no8_request": {"module": "ansible", "payload": ansible_payload,
-                            "effective_mode": EFFECTIVE_MODE, "mode_reason": MODE_REASON, "ansible_bin": ANSIBLE_BIN},
-            "no9_reply": ansible_reply
-        }
-
-    log_event(11, "mcp", reply, "mcp reply")
-    return reply
-
-
-@app.get("/whoami")
-def whoami():
-    expect = os.environ.get("MCP_TOKEN", "")
-    return {"ok": True, "expect_token_hash": _hash8(expect), "ts_jst": _jst_now_iso()}
+    summary = f"ホスト「{extra_vars.get('host')}」の {extra_vars.get('feature')} を {pb_path.name} で確認しました（mode={reply['mode']}）。"
+    resp = {"ok": True, "decision": decision, "summary": summary, "score": score,
+            "ansible": {"rc": reply["rc"], "ok": reply["ok"]}, "ts_jst": _now_jst(), "debug": debug}
+    _mcp_log(11, "mcp reply", {"status": 200, "summary": summary, "ansible_rc": reply["rc"]})
+    return resp

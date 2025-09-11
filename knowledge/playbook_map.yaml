@@ -1,0 +1,20 @@
+# knowledge/playbook_map.yaml
+version: 1
+defaults:
+  bgp:
+    prefer:
+      - file: playbooks/show_bgp_deep.yml
+        when:
+          any_keywords: ["neighbor","neigh","peer","ピア","ネイバー","経路","routes","詳細","deep","rib"]
+    fallback:
+      - file: playbooks/show_bgp.yml
+  ospf:
+    prefer:
+      - file: playbooks/show_ospf.yml
+    fallback: []
+aliases:
+  host:
+    r1: ["R1","ルータ1"]
+    r2: ["R2","ルータ2"]
+    l2a: ["L2A"]
+    l2b: ["L2B"]

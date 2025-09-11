@@ -1,0 +1,6 @@
+---
+- name: BGP deep (multi-vendor)
+  hosts: "{{ host | default('all') }}"
+  gather_facts: no
+  roles:
+    - role: bgp_deep

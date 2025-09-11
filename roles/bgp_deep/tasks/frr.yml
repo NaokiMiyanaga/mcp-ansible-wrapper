@@ -1,0 +1,59 @@
+---
+- name: BGP summary (FRR, JSON)
+  ansible.builtin.command: vtysh -c "show bgp summary json"
+  register: frr_sum_raw
+  changed_when: false
+  when: which_vtysh.rc == 0
+
+- name: Parse FRR summary
+  ansible.builtin.set_fact:
+    frr_sum: "{{ frr_sum_raw.stdout | from_json }}"
+  when: which_vtysh.rc == 0
+
+- name: Collect AFI/SAFI details (FRR, JSON)
+  ansible.builtin.command: vtysh -c "show bgp {{ item }} summary json"
+  loop: "{{ want_afis | default(['ipv4 unicast']) }}"
+  loop_control: { label: "{{ item }}" }
+  register: frr_afi_raw
+  changed_when: false
+  when: which_vtysh.rc == 0
+
+- name: Parse AFI/SAFI summaries
+  ansible.builtin.set_fact:
+    frr_afi: >-
+      {{
+        dict((item.item, (item.stdout | from_json)))
+        for item in frr_afi_raw.results
+      }}
+  when: which_vtysh.rc == 0
+
+- name: Build FRR neighbor/route report
+  ansible.builtin.set_fact:
+    bgp_report:
+      impl: "frr"
+      router_id: "{{ frr_sum.routerId | default(frr_sum.routerIdV4) }}"
+      peers_total: "{{ (frr_sum.peers | default({})) | length }}"
+      peers_established: >-
+        {{
+          (frr_sum.peers | dict2items | selectattr('value.state','equalto','Established') | list) | length
+        }}
+      peers_down: >-
+        {{
+          (frr_sum.peers | dict2items | rejectattr('value.state','equalto','Established') | list) | length
+        }}
+      down_list: >-
+        {{
+          (frr_sum.peers | dict2items
+            | rejectattr('value.state','equalto','Established')
+            | map(attribute='key') | list)
+        }}
+      afi: >-
+        {{
+          dict((k, {
+            'accepted_paths': (v.acceptedPaths | default(0)),
+            'received_paths': (v.receivedPaths | default(0)),
+            'installed_paths': (v.installedPaths | default(0)),
+            'rib_count': (v.paths | default(0))
+          }) for k,v in (frr_afi | default({})).items())
+        }}
+  when: which_vtysh.rc == 0
