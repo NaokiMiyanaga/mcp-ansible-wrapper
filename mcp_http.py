@@ -214,7 +214,9 @@ def call_ansible(payload: Dict[str, Any]) -> Dict[str, Any]:
             "vars": payload.get("vars", {}),
             "stdout": proc.stdout,
             "stderr": proc.stderr,
-            "rc": proc.returncode
+            "rc": proc.returncode,
+            "require_auth": REQUIRE_AUTH,
+            "token_set": bool(os.environ.get("MCP_TOKEN"))
         }
     except Exception as e:
         return {
@@ -260,7 +262,9 @@ def health():
         "ts_jst": _jst_now_iso(),
         "effective_mode": EFFECTIVE_MODE,
         "mode_reason": MODE_REASON,
-        "ansible_bin": ANSIBLE_BIN
+        "ansible_bin": ANSIBLE_BIN,
+        "require_auth": REQUIRE_AUTH,
+        "token_set": bool(os.environ.get("MCP_TOKEN"))
     }
 
 @app.post("/run")

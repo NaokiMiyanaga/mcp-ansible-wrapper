@@ -8,8 +8,10 @@ services:
       - "9000:9000"
     environment:
       AUTH_DEBUG: "1"
+      REQUIRE_AUTH: "1"   # 開発中はバイパスでOK（本番は必ず戻す）
       OPENAI_API_KEY: ${OPENAI_API_KEY}
-      MCP_TOKEN: ${MCP_TOKEN:-secret123}
+      MCP_TOKEN: "secret123"     
+      MCP_API_TOKEN: ${MCP_TOKEN:-secret123}
       MCP_ALLOW: ${MCP_ALLOW:-playbooks/*.yml}
       MCP_WORKDIR: ${MCP_WORKDIR:-/app}
       LOG_DIR: /app/logs

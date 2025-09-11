@@ -1,0 +1,13 @@
+---
+- name: bgp ops for {{ host | default('all') }}
+  hosts: "{{ host | default('all') }}"
+  gather_facts: no
+  tasks:
+    - name: show bgp status
+      ansible.builtin.shell: |
+        vtysh -c 'show {{ feature | default("bgp") }} summary' || true
+      register: out
+
+    - name: print bgp summary
+      ansible.builtin.debug:
+        msg: "{{ out.stdout | default('') }}"
