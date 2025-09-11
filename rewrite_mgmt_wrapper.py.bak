@@ -11,7 +11,7 @@ Usage examples (run at repo root):
 
   # Custom mapping
   python3 scripts/rewrite_mgmt_wrapper.py --root . \
-    --old-net 172.30.0.0/24 --new-net 172.30.0.0/24 \
+    --old-net 192.168.0.0/24 --new-net 172.30.0.0/24 \
     --old-base 192.168.0 --new-base 172.30.0 \
     --hosts 1,2,11,12,101 --apply
 
@@ -33,7 +33,7 @@ def is_text_file(p: pathlib.Path) -> bool:
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--root', default='.', help='directory to scan (repo root)')
-    ap.add_argument('--old-net', default='172.30.0.0/24')
+    ap.add_argument('--old-net', default='192.168.0.0/24')
     ap.add_argument('--new-net', default='172.30.0.0/24')
     ap.add_argument('--old-base', default='192.168.0')
     ap.add_argument('--new-base', default='172.30.0')

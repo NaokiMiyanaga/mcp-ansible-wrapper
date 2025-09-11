@@ -29,19 +29,19 @@ ietf-network:networks:
         - node-id: r1
           ietf-network-topology:termination-point:
             - tp-id: r1-mgmt
-              operational:ipv4: 172.30.0.1/24
+              operational:ipv4: 192.168.0.1/24
         - node-id: r2
           ietf-network-topology:termination-point:
             - tp-id: r2-mgmt
-              operational:ipv4: 172.30.0.2/24
+              operational:ipv4: 192.168.0.2/24
         - node-id: l2a
           ietf-network-topology:termination-point:
             - tp-id: l2a-mgmt
-              operational:ipv4: 172.30.0.11/24
+              operational:ipv4: 192.168.0.11/24
         - node-id: l2b
           ietf-network-topology:termination-point:
             - tp-id: l2b-mgmt
-              operational:ipv4: 172.30.0.12/24
+              operational:ipv4: 192.168.0.12/24
       ietf-network-topology:link:
         - link-id: mgmt-r1-r2
           ietf-network-topology:source: { source-node: r1, source-tp: r1-mgmt }
@@ -114,7 +114,7 @@ ietf-network:networks:
   operational:
     addressing:
       management:
-        ipv4_subnet: 172.30.0.0/24
+        ipv4_subnet: 192.168.0.0/24
       service:
         ipv4_subnet: 10.0.0.0/24
 
@@ -123,8 +123,8 @@ ietf-network:networks:
         r1: 65001
         r2: 65002
       router_id:
-        r1: 172.30.0.1
-        r2: 172.30.0.2
+        r1: 192.168.0.1
+        r2: 192.168.0.2
       # Explicit peering (maps to PEER_IP / neighbor remote-as)
       peering:
         - a: r1

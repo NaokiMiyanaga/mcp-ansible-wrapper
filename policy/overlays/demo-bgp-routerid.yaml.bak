@@ -2,5 +2,5 @@ ietf-network:networks:
   operational:
     bgp:
       router_id:
-        r1: 172.30.0.101
+        r1: 192.168.0.101
 
