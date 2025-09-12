@@ -5,6 +5,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from datetime import datetime
 from zoneinfo import ZoneInfo
+import yaml
 
 # -------- JSONL logger (MCP) --------
 _START_TS = datetime.now(ZoneInfo("Asia/Tokyo")).strftime("%Y%m%d-%H%M%S")
@@ -58,15 +59,55 @@ def health():
     _mcp_log(-1, "health", info)
     return info
 
+# --- RAG: knowledge-driven host/playbook selection ---
+_KB_PLAYBOOK_MAP = (BASE_DIR / 'knowledge' / 'playbook_map.yaml').resolve()
+
+def _load_playbook_map():
+    try:
+        with open(_KB_PLAYBOOK_MAP, 'r', encoding='utf-8') as f:
+            return yaml.safe_load(f) or {}
+    except Exception:
+        return {}
+
+def _extract_host(text: str, kb: dict) -> str:
+    t = (text or '').lower()
+    host = 'r1'
+    aliases = ((kb.get('aliases') or {}).get('host')) or {}
+    for h in aliases.keys():
+        if isinstance(h, str) and (h in t or h.lower() in t):
+            return h
+    for h, vals in aliases.items():
+        if any(isinstance(v, str) and (v in text or v.lower() in t) for v in (vals or [])):
+            return h
+    for cand in ['r1','r2','l2a','l2b']:
+        if cand in t:
+            return cand
+    return host
+
+def _pick_playbook_by_kb(feature: str, text: str, kb: dict) -> str:
+    defaults = (kb.get('defaults') or {}).get(feature) or {}
+    prefer = defaults.get('prefer') or []
+    t = (text or '').lower()
+    for rule in prefer:
+        when = rule.get('when') or {}
+        any_kw = when.get('any_keywords') or []
+        if any(isinstance(k,str) and (k in text or k.lower() in t) for k in any_kw):
+            f = rule.get('file')
+            if isinstance(f,str) and f:
+                return f
+    fb = defaults.get('fallback') or []
+    if fb:
+        f = fb[0].get('file')
+        if isinstance(f,str) and f:
+            return f
+    return ''
 def _plan_from_text(text: str) -> Dict[str, Any]:
-    t = (text or "").lower()
-    host = "r1"
-    for h in ["r1", "r2", "l2a", "l2b"]:
-        if h in t:
-            host = h
-            break
-    feature = "bgp" if ("bgp" in t or "ルーティング" in t or "経路" in t) else "bgp"
-    return {"host": host, "feature": feature, "playbook": ("playbooks/show_bgp_deep.yml" if ("詳細" in text or "neighbor" in t or "ネイバー" in text or "deep" in t) else "playbooks/show_bgp.yml")}
+    kb = _load_playbook_map()
+    t = (text or '').lower()
+    feature = 'bgp' if ('bgp' in t or 'ルーティング' in text or '経路' in text) else 'bgp'
+    host = _extract_host(text, kb)
+    pb = _pick_playbook_by_kb(feature, text, kb) or 'playbooks/show_bgp.yml'
+    return {"host": host, "feature": feature, "playbook": pb}
 
 def _run_ansible(playbook: str, extra_vars: Dict[str, Any]) -> Dict[str, Any]:
     if EFFECTIVE_MODE != "exec":
@@ -132,6 +173,7 @@ async def run(request: Request):
         "no9_reply": reply,
     }
     summary = f"ホスト「{extra_vars.get('host')}」の {extra_vars.get('feature')} を {pb_path.name} で確認しました（mode={reply['mode']}）。"
+    debug["no10_output"] = {"summary": summary}
     resp = {"ok": True, "decision": decision, "summary": summary, "score": score,
             "ansible": {"rc": reply["rc"], "ok": reply["ok"]}, "ts_jst": _now_jst(), "debug": debug}
     _mcp_log(10, "mcp gpt output", {"summary": summary})
