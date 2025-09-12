@@ -55,7 +55,7 @@ def health():
         "ansible_bin": ANSIBLE_BIN, "require_auth": REQUIRE_AUTH, "token_set": bool(MCP_TOKEN),
         "base_dir": str(BASE_DIR),
     }
-    _mcp_log(0, "health", info)
+    _mcp_log(-1, "health", info)
     return info
 
 def _plan_from_text(text: str) -> Dict[str, Any]:
@@ -66,7 +66,7 @@ def _plan_from_text(text: str) -> Dict[str, Any]:
             host = h
             break
     feature = "bgp" if ("bgp" in t or "ルーティング" in t or "経路" in t) else "bgp"
-    return {"host": host, "feature": feature, "playbook": "playbooks/show_bgp.yml"}
+    return {"host": host, "feature": feature, "playbook": ("playbooks/show_bgp_deep.yml" if ("詳細" in text or "neighbor" in t or "ネイバー" in text or "deep" in t) else "playbooks/show_bgp.yml")}
 
 def _run_ansible(playbook: str, extra_vars: Dict[str, Any]) -> Dict[str, Any]:
     if EFFECTIVE_MODE != "exec":
@@ -104,6 +104,7 @@ async def run(request: Request):
     payload = (body.get("payload") or {})
 
     plan = _plan_from_text(text)
+    _mcp_log(7, "mcp gpt input", {"prompt": text, "decision": decision, "score": score, "plan": plan})
     explicit_pb: Optional[str] = payload.get("playbook") if isinstance(payload, dict) else None
     chosen_pb = explicit_pb or plan.get("playbook")
 
@@ -133,5 +134,6 @@ async def run(request: Request):
     summary = f"ホスト「{extra_vars.get('host')}」の {extra_vars.get('feature')} を {pb_path.name} で確認しました（mode={reply['mode']}）。"
     resp = {"ok": True, "decision": decision, "summary": summary, "score": score,
             "ansible": {"rc": reply["rc"], "ok": reply["ok"]}, "ts_jst": _now_jst(), "debug": debug}
+    _mcp_log(10, "mcp gpt output", {"summary": summary})
     _mcp_log(11, "mcp reply", {"status": 200, "summary": summary, "ansible_rc": reply["rc"]})
     return resp
