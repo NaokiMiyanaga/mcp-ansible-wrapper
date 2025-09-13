@@ -104,11 +104,28 @@ def _pick_playbook_by_kb(feature: str, text: str, kb: dict) -> str:
 def _plan_from_text(text: str) -> Dict[str, Any]:
     kb = _load_playbook_map()
     t = (text or '').lower()
-    feature = 'bgp' if ('bgp' in t or 'ルーティング' in text or '経路' in text) else 'bgp'
+    # Determine feature from intent (inventory -> ospf -> bgp -> others)
+    if any(k in text or k in t for k in ['inventory','構成','台数','デバイス','機器','ノード','一覧','何台','評価環境','試験環境','lab-net']):
+        feature = 'inventory'
+    elif ('ospf' in t or 'OSPF' in text or 'エリア' in text or 'LSA' in text):
+        feature = 'ospf'
+    elif ('bgp' in t or 'ルーティング' in text or '経路' in text):
+        feature = 'bgp'
+    elif ('vlan' in t or 'VLAN' in text):
+        feature = 'vlan'
+    elif ('interface' in t or 'インタフェース' in text or 'IF' in text):
+        feature = 'interface'
+    elif ('isis' in t or 'ISIS' in text):
+        feature = 'isis'
+    elif ('snmp' in t or 'SNMP' in text):
+        feature = 'snmp'
+    elif ('log' in t or 'ログ' in text):
+        feature = 'logs'
+    else:
+        feature = 'bgp'
     host = _extract_host(text, kb)
     pb = _pick_playbook_by_kb(feature, text, kb) or 'playbooks/show_bgp.yml'
     return {"host": host, "feature": feature, "playbook": pb}
-
 def _run_ansible(playbook: str, extra_vars: Dict[str, Any]) -> Dict[str, Any]:
     if EFFECTIVE_MODE != "exec":
         return {
@@ -143,11 +160,13 @@ async def run(request: Request):
     decision = body.get("decision", "run")
     score = body.get("score", 1)
     payload = (body.get("payload") or {})
+    candidates = body.get("candidates") if isinstance(body.get("candidates"), list) else []
+    intent = body.get("intent") or "run"
 
     plan = _plan_from_text(text)
     _mcp_log(7, "mcp gpt input", {"prompt": text, "decision": decision, "score": score, "plan": plan})
     explicit_pb: Optional[str] = payload.get("playbook") if isinstance(payload, dict) else None
-    chosen_pb = explicit_pb or plan.get("playbook")
+    chosen_pb = explicit_pb or (candidates[0] if candidates else None) or plan.get("playbook")
 
     pb_path = Path(chosen_pb)
     if not pb_path.is_absolute():
@@ -164,6 +183,22 @@ async def run(request: Request):
     user_vars = payload.get("vars") if isinstance(payload, dict) else None
     if isinstance(user_vars, dict):
         extra_vars.update(user_vars)
+
+    # If propose_create intent is sent, do not run Ansible; return proposal
+    if intent == "propose_create":
+        dbg = {
+            "propose_new_playbook": {
+                "feature": plan["feature"],
+                "suggested_path": str(pb_path),
+                "vars_suggest": extra_vars,
+                "template_hint": "/app/knowledge/templates/playbook.new.yml.j2",
+            }
+        }
+        summary = f"Playbook 提案: {pb_path.name}（feature={plan['feature']}）"
+        resp = {"ok": True, "decision": decision, "summary": summary, "score": score,
+                "ansible": {"rc": 0, "ok": True}, "ts_jst": _now_jst(), "debug": dbg}
+        _mcp_log(11, "mcp reply", {"status": 200, "summary": summary, "intent": "propose_create"})
+        return resp
 
     reply = _run_ansible(str(pb_path), extra_vars)
     debug = {

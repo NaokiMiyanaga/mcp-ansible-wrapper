@@ -21,10 +21,13 @@ services:
       ANSIBLE_RUN: exec
       ANSIBLE_BIN: /usr/local/bin/ansible-playbook 
     volumes:
+      - ./knowledge:/app/knowledge:ro
+      - ./playbooks:/app/playbooks:ro
       - ./playbooks:/app/playbooks:rw
       - ./inventory.ini:/app/inventory.ini:ro   # ← 正解
       - ./logs:/app/logs
       - ./mcp_http.py:/app/mcp_http.py:ro   # ★これを追加
+      - ./knowledge:/app/knowledge:ro
     restart: unless-stopped
     command: [
       "uvicorn","mcp_http:app",
@@ -54,4 +57,3 @@ services:
 networks:
   mgmtnet:
     external: true
-

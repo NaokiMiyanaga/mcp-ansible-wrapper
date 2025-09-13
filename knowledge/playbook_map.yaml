@@ -8,10 +8,46 @@ defaults:
           any_keywords: ["neighbor","neigh","peer","ピア","ネイバー","経路","routes","詳細","deep","rib"]
     fallback:
       - file: playbooks/show_bgp.yml
+  inventory:
+    prefer:
+      - file: playbooks/network_overview.yml
+        when:
+          any_keywords: ["inventory","構成","台数","デバイス","機器","ノード","一覧","何台","環境","評価環境","試験環境","lab-net"]
+    fallback: []
   ospf:
     prefer:
       - file: playbooks/show_ospf.yml
     fallback: []
+  interface:
+    prefer:
+      - file: playbooks/if_addr.yml
+    fallback:
+      - file: playbooks/host_ip.yml
+  vlan:
+    prefer:
+      - file: playbooks/bridge_summary.yml
+    fallback:
+      - file: playbooks/bridge_check.yml
+  isis:
+    prefer:
+      - file: playbooks/show_isis.yml
+    fallback:
+      - file: playbooks/frr_check.yml
+  snmp:
+    prefer:
+      - file: playbooks/show_snmp.yml
+    fallback:
+      - file: playbooks/frr_check.yml
+  logs:
+    prefer:
+      - file: playbooks/ops_export.yml
+    fallback:
+      - file: playbooks/router_summary.yml
+  ospf_deep:
+    prefer:
+      - file: playbooks/show_ospf_deep.yml
+    fallback:
+      - file: playbooks/frr_check.yml
 aliases:
   host:
     r1: ["R1","ルータ1"]
