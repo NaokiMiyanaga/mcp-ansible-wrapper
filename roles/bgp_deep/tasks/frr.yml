@@ -18,13 +18,17 @@
   changed_when: false
   when: which_vtysh.rc == 0
 
-- name: Parse AFI/SAFI summaries
+- name: Init AFI/SAFI summaries dict
   ansible.builtin.set_fact:
-    frr_afi: >-
-      {{
-        dict((item.item, (item.stdout | from_json)))
-        for item in frr_afi_raw.results
-      }}
+    frr_afi: {}
+  when: which_vtysh.rc == 0
+
+- name: Parse AFI/SAFI summaries (safe combine)
+  ansible.builtin.set_fact:
+    frr_afi: "{{ frr_afi | combine({ item.item: (item.stdout | from_json) }) }}"
+  loop: "{{ frr_afi_raw.results }}"
+  loop_control:
+    label: "{{ item.item }}"
   when: which_vtysh.rc == 0
 
 - name: Build FRR neighbor/route report

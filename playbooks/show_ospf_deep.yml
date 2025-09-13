@@ -1,0 +1,47 @@
+---
+- name: OSPF deep (neighbors overview)
+  hosts: "{{ host | default('all') }}"
+  gather_facts: no
+  tasks:
+    - name: Check vtysh presence
+      ansible.builtin.shell: command -v vtysh || true
+      register: vtysh_path
+      changed_when: false
+
+    - name: Strict mode fail when vtysh missing
+      ansible.builtin.fail:
+        msg: |
+          Machine summary (JSON):
+          {"code":"no_vtysh_strict","message":"vtysh not found (strict mode)","hint":"Target FRR device may not be reachable from current Ansible connection."}
+      when: (vtysh_path.stdout == "") and ((strict_frr | default(true)) | bool)
+
+    - name: show ospf neighbor (when vtysh exists)
+      ansible.builtin.shell: |
+        vtysh -c 'show ip ospf neighbor' || true
+      register: out
+      when: vtysh_path.stdout != ""
+
+    - name: print ospf neighbor (human)
+      ansible.builtin.debug:
+        msg: "{{ out.stdout | default('') }}"
+      when: vtysh_path.stdout != ""
+
+    - name: summarize ospf deep (machine json)
+      when: vtysh_path.stdout != ""
+      vars:
+        _lines: "{{ (out.stdout | default('')) | split('\n') }}"
+        _neigh_list: "{{ _lines | select('match', '^\\s*\\d+\\.\\d+\\.\\d+\\.\\d+\\s+') | list }}"
+        _full_list: "{{ _lines | select('search', '\\bFull\\b') | list }}"
+      ansible.builtin.set_fact:
+        ospf_deep_summary:
+          impl: "FRR"
+          neighbors_total: "{{ (_neigh_list | length) | int }}"
+          neighbors_full: "{{ (_full_list | length) | int }}"
+
+    - name: print machine summary (json)
+      when: vtysh_path.stdout != ""
+      ansible.builtin.debug:
+        msg: |
+          Machine summary (JSON):
+          {{ ospf_deep_summary | to_json }}
+

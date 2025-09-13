@@ -29,26 +29,30 @@
     - name: summarize bgp (machine json)
       when: vtysh_path.stdout != ""
       vars:
-        _tot_list: '{{ out.stdout | regex_findall("Total number of neighbors\\s*(\\d+)") }}'
-        # FRR列構造に基づき State/PfxRcd 列の数値を抽出（Establishedのとき数値、Down/Idle等は非数）
-        _est_list: '{{ out.stdout | regex_findall("(?m)^\\s*\\d+\\.\\d+\\.\\d+\\.\\d+\\s+\\d+\\s+\\d+\\s+\\d+\\s+\\d+\\s+\\d+\\s+\\d+\\s+\\d+\\s+\\S+\\s+(\\d+)") }}'
-        _est: '{{ (_est_list | length) | string }}'
-        _rid_list: '{{ out.stdout | regex_findall("BGP router identifier\\s+(\\S+)") }}'
-        _asn_list: '{{ out.stdout | regex_findall("local AS number\\s+(\\d+)") }}'
+        _lines: "{{ out.stdout | split('\n') }}"
+        # シンプル: 隣接行は先頭がIPv4で始まる行
+        _neigh_lines: "{{ _lines | select('match', '^\\s*\\d+\\.\\d+\\.\\d+\\.\\d+\\s+') | list }}"
+        _peers_total: "{{ (_neigh_lines | length) | int }}"
+        # Established とみなす行: 行末のトークンが数値
+        _est_lines: "{{ _lines | select('match', '^\\s*\\d+\\.\\d+\\.\\d+\\.\\d+.*\\s\\d+\\s*$') | list }}"
+        _peers_established: "{{ (_est_lines | length) | int }}"
+        _rid_line: "{{ (_lines | select('match', '^BGP router identifier\\s+') | list) | first | default('') }}"
+        _asn_line: "{{ (_lines | select('search', 'local AS number\\s+\\d+') | list) | first | default('') }}"
       ansible.builtin.set_fact:
         bgp_summary:
           impl: "FRR"
-          router_id: "{{ (_rid_list | first | default('')) }}"
-          local_as: "{{ ((_asn_list | first | default('')) | int) if ((_asn_list | length) > 0) else omit }}"
-          peers_total: "{{ ((_tot_list | first | default('0')) | int) }}"
-          peers_established: "{{ _est | int }}"
-          peers_down: "{{ (((_tot_list | first | default('0')) | int) - (_est | int)) }}"
+          router_id: "{{ _rid_line | regex_replace('^BGP router identifier\\s+([^,\\s]+).*$','\\1') }}"
+          local_as: "{{ (_asn_line | regex_replace('^.*local AS number\\s+(\\d+).*$','\\1')) | int if (_asn_line | length) > 0 else omit }}"
+          peers_total: "{{ _peers_total }}"
+          peers_established: "{{ _peers_established }}"
+          peers_down: "{{ (_peers_total - _peers_established) }}"
 
-    - name: debug bgp parsed vars
-      when: vtysh_path.stdout != ""
-      ansible.builtin.debug:
-        msg: |
-          [debug] _tot_list={{ _tot_list | to_json }} _est_list={{ _est_list | to_json }} _rid_list={{ _rid_list | to_json }} _asn_list={{ _asn_list | to_json }}
+    # Optional: debug variables (disabled by default)
+    #- name: debug bgp parsed vars
+    #  when: vtysh_path.stdout != ""
+    #  ansible.builtin.debug:
+    #    msg: |
+    #      [debug] peers_total={{ _peers_total }} peers_established={{ _peers_established }} rid={{ _rid_list | first | default('') }} asn={{ _asn_list | first | default('') }}
 
     - name: print machine summary (json)
       when: vtysh_path.stdout != ""

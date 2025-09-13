@@ -1,0 +1,12 @@
+---
+- name: Routers inventory list
+  hosts: routers
+  gather_facts: false
+  tasks:
+    - name: Emit routers list (run once)
+      run_once: true
+      ansible.builtin.debug:
+        msg: |
+          Machine summary (JSON):
+          {{ {'routers': groups['routers'] | default([])} | to_json }}
+
