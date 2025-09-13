@@ -1,5 +1,5 @@
 ---
-- name: bgp ops for {{ host | default('all') }}
+- name: ospf ops for {{ host | default('all') }}
   hosts: "{{ host | default('all') }}"
   gather_facts: no
   tasks:
@@ -15,13 +15,13 @@
           {"code":"no_vtysh_strict","message":"vtysh not found (strict mode)","hint":"Target FRR device may not be reachable from current Ansible connection."}
       when: (vtysh_path.stdout == "") and ((strict_frr | default(true)) | bool)
 
-    - name: show bgp status (when vtysh exists)
+    - name: show ospf neighbor (when vtysh exists)
       ansible.builtin.shell: |
-        vtysh -c 'show ip bgp summary' || true
+        vtysh -c 'show ip ospf neighbor' || true
       register: out
       when: vtysh_path.stdout != ""
 
-    - name: print bgp summary
+    - name: print ospf neighbor
       ansible.builtin.debug:
         msg: "{{ out.stdout | default('') }}"
       when: vtysh_path.stdout != ""

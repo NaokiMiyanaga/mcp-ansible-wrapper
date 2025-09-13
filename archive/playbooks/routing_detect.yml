@@ -1,0 +1,44 @@
+---
+- name: Detect routing protocols (FRR)
+  hosts: "{{ host | default('all') }}"
+  gather_facts: no
+  tasks:
+    - name: Check FRR version (presence)
+      ansible.builtin.shell: |
+        vtysh -c 'show version' 2>&1 || true
+      register: ver
+      changed_when: false
+
+    - name: Probe BGP
+      ansible.builtin.shell: |
+        vtysh -c 'show ip bgp summary' 2>&1 || true
+      register: bgp
+      changed_when: false
+
+    - name: Probe OSPF
+      ansible.builtin.shell: |
+        vtysh -c 'show ip ospf neighbor' 2>&1 || true
+      register: ospf
+      changed_when: false
+
+    - name: Probe static routes (count)
+      ansible.builtin.shell: |
+        vtysh -c 'show running-config' 2>/dev/null | grep -E '^ip route ' | wc -l || true
+      register: static_count
+      changed_when: false
+
+    - name: Summarize detection (machine-friendly JSON)
+      ansible.builtin.debug:
+        msg: |
+          Machine summary (JSON):
+          {
+            "impl": "FRR",
+            "bgp": {{ (bgp.stdout is defined) and ('BGP' in bgp.stdout or 'Neighbor' in bgp.stdout) | ternary(true,false) }},
+            "ospf": {{ (ospf.stdout is defined) and ('Neighbor' in ospf.stdout or 'Router ID' in ospf.stdout) | ternary(true,false) }},
+            "static": {{ (static_count.stdout | default('0') | int) }},
+            "notes": {
+              "bgp_excerpt": {{ (bgp.stdout | default('') ) | to_json }},
+              "ospf_excerpt": {{ (ospf.stdout | default('') ) | to_json }}
+            }
+          }
+

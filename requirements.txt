@@ -2,6 +2,7 @@
 fastapi
 uvicorn[standard]
 ansible
+docker
 PyYAML
 jsonschema
 openai

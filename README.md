@@ -26,6 +26,27 @@ mcp-ansible-wrapper/
 docker compose down
 docker compose up -d --build
 
+## RAG Overview
+- Knowledge: `knowledge/playbook_map.yaml` (feature→prefer/fallback)
+- Logs: 6/7/8/9/10/11 (-1 for health)
+- Honors Chainlit `payload.candidates[0]` (if provided) as tentative playbook
+- `intent=propose_create`: returns `debug.propose_new_playbook` with {feature,suggested_path,vars_suggest,template_hint}
+
+### Feature→Playbook (defaults)
+- inventory: network_overview.yml
+- bgp: show_bgp.yml / show_bgp_deep.yml
+- ospf: show_ospf.yml
+- interface: if_addr.yml → host_ip.yml (fallback)
+- vlan: bridge_summary.yml → bridge_check.yml (fallback)
+- isis: show_isis.yml → frr_check.yml (fallback)
+- snmp: show_snmp.yml → frr_check.yml (fallback)
+- logs: ops_export.yml → router_summary.yml (fallback)
+- ospf_deep: show_ospf_deep.yml → frr_check.yml (fallback)
+
+## Dev/Prod
+- Dev: mount `./knowledge:/app/knowledge:ro`, `./playbooks:/app/playbooks:ro` for instant reflection
+- Prod: bake knowledge/playbooks into the image
+
 # 動作確認
 curl -sS http://localhost:9000/health | jq .
 curl -sS http://localhost:9000/meta | jq .

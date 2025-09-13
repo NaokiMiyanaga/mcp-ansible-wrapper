@@ -56,7 +56,8 @@ def health():
         "ansible_bin": ANSIBLE_BIN, "require_auth": REQUIRE_AUTH, "token_set": bool(MCP_TOKEN),
         "base_dir": str(BASE_DIR),
     }
-    _mcp_log(-1, "health", info)
+    if os.getenv("MCP_LOG_HEALTH", "0") == "1":
+        _mcp_log(-1, "health", info)
     return info
 
 # --- RAG: knowledge-driven host/playbook selection ---
@@ -136,7 +137,8 @@ def _run_ansible(playbook: str, extra_vars: Dict[str, Any]) -> Dict[str, Any]:
     with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False, encoding="utf-8") as f:
         json.dump(extra_vars, f, ensure_ascii=False)
         ev = f.name
-    cmd = [ANSIBLE_BIN, playbook, "-e", f"@{ev}"]
+    inv = str(Path(os.getenv("ANSIBLE_INVENTORY", "/app/inventory.ini")).resolve())
+    cmd = [ANSIBLE_BIN, playbook, "-i", inv, "-e", f"@{ev}"]
     _mcp_log(8, "mcp ansible request", {"cmd": cmd})
     p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     out, err = p.communicate()

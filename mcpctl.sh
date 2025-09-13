@@ -29,6 +29,8 @@ ensure_service() {
 
 start() {
   ensure_service
+  # ensure external network for cross-repo connectivity
+  docker network inspect mgmtnet >/dev/null 2>&1 || docker network create mgmtnet >/dev/null 2>&1 || true
   echo "[+] Build & start: $SERVICE"
   compose up -d --build "$SERVICE"
   status

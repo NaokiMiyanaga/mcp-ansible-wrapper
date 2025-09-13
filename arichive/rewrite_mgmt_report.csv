@@ -1,4 +1,0 @@
-file,before_lines,after_lines
-rewrite_mgmt_wrapper.py,118,118
-policy/master.ietf.yaml,194,194
-policy/overlays/demo-bgp-routerid.yaml,7,7

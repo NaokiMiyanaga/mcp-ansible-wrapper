@@ -20,6 +20,7 @@ services:
       OPENAI_MODEL_SUM: gpt-4o-mini
       ANSIBLE_RUN: exec
       ANSIBLE_BIN: /usr/local/bin/ansible-playbook 
+      DOCKER_HOST: unix:///var/run/docker.sock
     volumes:
       - ./knowledge:/app/knowledge:ro
       - ./playbooks:/app/playbooks:ro
@@ -28,6 +29,7 @@ services:
       - ./logs:/app/logs
       - ./mcp_http.py:/app/mcp_http.py:ro   # ★これを追加
       - ./knowledge:/app/knowledge:ro
+      - /Users/naoki/.orbstack/run/docker.sock:/var/run/docker.sock
     restart: unless-stopped
     command: [
       "uvicorn","mcp_http:app",
