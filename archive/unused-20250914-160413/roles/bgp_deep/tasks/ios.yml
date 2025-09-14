@@ -1,0 +1,31 @@
+---
+- name: BGP summary (Cisco IOS)
+  vars:
+    ansible_network_os: ios
+  cisco.ios.ios_command:
+    commands:
+      - show ip bgp summary
+  register: ios_sum
+  changed_when: false
+  failed_when: false
+
+- name: Normalize IOS stdout
+  set_fact:
+    ios_stdout_list: >-
+      {{
+        ios_sum.stdout | default(
+          ios_sum.stdout_lines | default(
+            (ios_sum.results | map(attribute='stdout') | list) | default([])
+          )
+        )
+      }}
+    ios_stdout_text: "{{ (ios_stdout_list | join('\n')) | default('') }}"
+
+- name: Build IOS neighbor/route report
+  set_fact:
+    bgp_report:
+      impl: "ios"
+      summary_text: "{{ ios_stdout_text }}"
+      peers_total: "{{ (ios_stdout_text.splitlines() | select('match','^ *[0-9.]+') | list | length) | int }}"
+      peers_established: "{{ (ios_stdout_text | regex_findall(' (?:Estab|[0-9]+:[0-9]+:..)') | length) | int }}"
+      peers_down: "{{ ( (ios_stdout_text.splitlines() | select('match','^ *[0-9.]+') | list | length) | int ) - ( (ios_stdout_text | regex_findall(' (?:Estab|[0-9]+:[0-9]+:..)') | length) | int ) }}"
