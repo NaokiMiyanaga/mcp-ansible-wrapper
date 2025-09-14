@@ -14,6 +14,9 @@ services:
       MCP_API_TOKEN: ${MCP_TOKEN:-secret123}
       MCP_ALLOW: ${MCP_ALLOW:-playbooks/*.yml}
       MCP_WORKDIR: ${MCP_WORKDIR:-/app}
+      MCP_TOOLS_ENUM_MODE: "auto"
+      MCP_TOOLS_ENUM_FALLBACK: "r1,r2"
+      MCP_TOOLS_ENUM_TTL: "5"
       LOG_DIR: /app/logs
       LOG_JSONL: "1"
       OPENAI_MODEL_PLAN: gpt-4o-mini

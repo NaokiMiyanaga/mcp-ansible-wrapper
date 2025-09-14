@@ -1,0 +1,38 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://example.local/mcp/schema/tools-list.schema.json",
+  "title": "MCP Tools List Response",
+  "type": "object",
+  "required": ["ok", "tools"],
+  "properties": {
+    "ok": {"type": "boolean"},
+    "tools": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "title", "tags", "inputs_schema"],
+        "properties": {
+          "id": {"type": "string"},
+          "title": {"type": "string"},
+          "description": {"type": "string"},
+          "tags": {
+            "type": "array",
+            "items": {"type": "string"}
+          },
+          "inputs_schema": {"type": "object"},
+          "examples": {
+            "type": "array",
+            "items": {"type": "string"}
+          },
+          "version": {"type": "string"},
+          "deprecated": {"type": "boolean"}
+        },
+        "additionalProperties": true
+      }
+    },
+    "ts_jst": {"type": "string"},
+    "server_version": {"type": "string"}
+  },
+  "additionalProperties": true
+}
+

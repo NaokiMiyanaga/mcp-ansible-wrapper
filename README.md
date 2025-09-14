@@ -2,11 +2,10 @@
 # MCP meta/plan 拡張（追加API）
 
 追加されるエンドポイント
-- `GET /health` … `{"status":"ok","allow":"...","meta_count":N}`
-- `GET /meta` … メタ一覧（id/title/tags/capabilities/path）
-- `GET /meta/{id}` … 個別メタ（inputs_schema/例など含む）
-- `POST /plan` … 意図から playbook 候補→決定（decision/candidates/vars/validation）
-- 既存 `POST /mcp/run` … そのまま
+- `GET /health` … 健全性
+- `GET /tools/list` … ツールカタログ（id/title/tags/inputs_schema/examples）
+- `GET /tools/tags` … タグのタクソノミ一覧
+- 既存 `POST /mcp/run` … そのまま（将来 `/run` に統一）
 
 ## 置き方
 ```
@@ -49,13 +48,10 @@ docker compose up -d --build
 
 # 動作確認
 curl -sS http://localhost:9000/health | jq .
-curl -sS http://localhost:9000/meta | jq .
-curl -sS http://localhost:9000/meta/pb.bgp.neighbor.add@ansible | jq .
+curl -sS http://localhost:9000/tools/list | jq .
+curl -sS http://localhost:9000/tools/tags | jq .
 
-# プランニング（OpenAI未設定でも動作。未設定時はスコア上位を選択）
-curl -sS -H "Content-Type: application/json"   -d '{"intent":"R1に10.0.0.2のBGPピア(AS65002)追加して"}'   http://localhost:9000/plan | jq .
-
-# 実行（/planの結果を使う例）
+# 実行
 curl -sS -H "Authorization: Bearer secret123" -H "Content-Type: application/json"   -d '{"playbook":"playbooks/bgp/add_neighbor.yml","limit":"r1","extra_vars":{"local_asn":65001,"neighbor_ip":"10.0.0.2","neighbor_asn":65002}}'   http://localhost:9000/mcp/run | jq .
 ```
 
@@ -63,6 +59,15 @@ curl -sS -H "Authorization: Bearer secret123" -H "Content-Type: application/json
 - `MCP_ALLOW` = `playbooks/*.yml` 推奨（評価環境）
 - `OPENAI_API_KEY` / `OPENAI_MODEL`（任意）
 - `RULES_DB`（任意、将来の高度な前段ルータに）
+- `MCP_TOOLS_ENUM_MODE`（既定=auto）: `embed|hint|auto`。`/tools/list` の `host` に enum を埋め込むかの制御。
+- `MCP_TOOLS_ENUM_TTL`（既定=60秒）: routers_list の再探索TTL。
+ - `MCP_TOOLS_ENUM_FALLBACK`（任意）: 非execモード時に enum として埋め込む候補（例: `r1,r2`）。未設定なら埋め込みなし。
+
+## Tools catalog の検証（任意）
+```
+pip install jsonschema
+python scripts/validate_tools_list.py --url http://localhost:9000/tools/list
+```
 
 ## 備考
 - OpenAI未設定でも `/plan` は「メタの軽いスコアリング→Top-1選択」で動きます。

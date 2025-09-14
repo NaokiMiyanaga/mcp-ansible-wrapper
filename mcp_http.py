@@ -1,4 +1,4 @@
-import os, json, subprocess, tempfile
+import os, json, subprocess, tempfile, re, time
 from pathlib import Path
 from typing import Dict, Any, Optional
 from fastapi import FastAPI, Request
@@ -12,12 +12,15 @@ _START_TS = datetime.now(ZoneInfo("Asia/Tokyo")).strftime("%Y%m%d-%H%M%S")
 _MCP_LOG_DIR = Path(os.getenv("MCP_LOG_DIR", "/app/logs")).resolve()
 _MCP_LOG_DIR.mkdir(parents=True, exist_ok=True)
 _MCP_LOG_FILE = _MCP_LOG_DIR / f"mcp_events_{_START_TS}.jsonl"
+_REQ_ID: Optional[str] = None
 
 def _now_jst():
     return datetime.now(ZoneInfo("Asia/Tokyo")).isoformat()
 
 def _mcp_log(no: int, tag: str, content: Any):
     rec = {"ts_jst": _now_jst(), "no": no, "actor": "mcp", "tag": tag, "content": content}
+    if _REQ_ID:
+        rec["request_id"] = _REQ_ID
     try:
         with _MCP_LOG_FILE.open("a", encoding="utf-8") as f:
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")
@@ -34,8 +37,16 @@ BASE_DIR = Path(__file__).resolve().parent
 
 app = FastAPI(title="MCP")
 
-def _unauth(msg='missing bearer token'):
-    return JSONResponse({"ok": False, "error": msg}, status_code=401)
+def _err_payload(code: str, message: str, details: Optional[Dict[str, Any]] = None, status: int = 200) -> JSONResponse:
+    body: Dict[str, Any] = {"ok": False, "error": {"code": code, "message": message}}
+    if details:
+        body["error"]["details"] = details
+    if _REQ_ID:
+        body["request_id"] = _REQ_ID
+    return JSONResponse(body, status_code=status)
+
+def _unauth(msg: str = 'missing bearer token'):
+    return _err_payload("unauthorized", msg, status=401)
 
 async def _auth(request: Request):
     if not REQUIRE_AUTH:
@@ -59,6 +70,139 @@ def health():
     if os.getenv("MCP_LOG_HEALTH", "0") == "1":
         _mcp_log(-1, "health", info)
     return info
+
+# ---- Tools/tags registry ----
+SERVER_VERSION = os.getenv("MCP_SERVER_VERSION", "v1")
+
+TAG_TAXONOMY = [
+    {"id": "inventory", "description": "Topology and assets inventory"},
+    {"id": "count", "description": "Count-oriented outputs"},
+    {"id": "routers", "description": "L3 routers discovery"},
+    {"id": "routing", "description": "Layer-3 routing generic"},
+    {"id": "bgp", "description": "BGP operations"},
+    {"id": "ospf", "description": "OSPF operations"},
+    {"id": "l2", "description": "Layer-2 switching"},
+    {"id": "status", "description": "Operational status"},
+    {"id": "deep", "description": "Deep-dive variants"},
+]
+
+# ---- Dynamic enum (routers) discovery with TTL cache ----
+_HOSTS_CACHE: list[str] = []
+_HOSTS_CACHE_TS: float = 0.0
+
+def _extract_machine_json(stdout: str) -> Optional[Dict[str, Any]]:
+    try:
+        m = re.search(r"Machine summary\s*\(JSON\)\s*:\s*([\s\S]+)$", stdout, re.IGNORECASE)
+        if not m:
+            return None
+        jm = re.search(r"(\{[\s\S]*\})", m.group(1))
+        if not jm:
+            return None
+        return json.loads(jm.group(1))
+    except Exception:
+        return None
+
+def _discover_hosts() -> list[str]:
+    global _HOSTS_CACHE, _HOSTS_CACHE_TS
+    ttl = int(os.getenv("MCP_TOOLS_ENUM_TTL", "60"))
+    now = time.time()
+    if _HOSTS_CACHE and (now - _HOSTS_CACHE_TS) < ttl:
+        return list(_HOSTS_CACHE)
+    hosts: list[str] = []
+    mode = None
+    try:
+        pb = (BASE_DIR / "playbooks" / "routers_list.yml").resolve()
+        if pb.exists():
+            rep = _run_ansible(str(pb), {})
+            mode = rep.get("mode")
+            stdout = rep.get("stdout") or ""
+            if isinstance(stdout, str) and stdout:
+                obj = _extract_machine_json(stdout)
+                arr = (obj or {}).get("routers") if isinstance(obj, dict) else None
+                if isinstance(arr, list):
+                    hosts = [str(x) for x in arr if str(x)]
+    except Exception:
+        hosts = []
+    # Optional fallback using env (lab/demo convenience)
+    fb = os.getenv("MCP_TOOLS_ENUM_FALLBACK", "")
+    if not hosts and fb:
+        hosts = [h.strip() for h in fb.split(",") if h.strip()]
+    try:
+        _mcp_log(-1, "tools enum discovery", {"mode": mode, "hosts": hosts})
+    except Exception:
+        pass
+    _HOSTS_CACHE = list(hosts)
+    _HOSTS_CACHE_TS = now
+    return hosts
+
+def _tools_catalog() -> list[dict]:
+    # Determine enum embedding mode
+    enum_mode = os.getenv("MCP_TOOLS_ENUM_MODE", "auto").lower()  # embed | hint | auto
+    hosts: list[str] = []
+    if enum_mode in ("embed", "auto"):
+        try:
+            hosts = _discover_hosts()
+        except Exception:
+            hosts = []
+    host_prop: Dict[str, Any] = {
+        "type": "string",
+        "description": "Target router (e.g., r1)",
+        "x-enum-source": "routers_list",  # dynamic enum hint
+    }
+    if hosts:
+        # Embed enum while keeping hint and a timestamp
+        host_prop["enum"] = hosts
+        host_prop["x-enum-ts"] = _now_jst()
+    return [
+        {
+            "id": "playbooks/network_overview.yml",
+            "title": "Network overview",
+            "description": "Summarize lab topology (counts of routers/L2/hosts)",
+            "tags": ["inventory", "count"],
+            "inputs_schema": {"type": "object", "properties": {}, "required": []},
+            "examples": ["評価環境の構成は？", "試験環境の構成を教えて"],
+            "version": "v1"
+        },
+        {
+            "id": "playbooks/routers_list.yml",
+            "title": "Routers list",
+            "description": "List L3 devices (routers) in the environment",
+            "tags": ["inventory", "routers"],
+            "inputs_schema": {"type": "object", "properties": {}, "required": []},
+            "examples": ["L3デバイス一覧を教えて"],
+            "version": "v1"
+        },
+        {
+            "id": "playbooks/show_bgp.yml",
+            "title": "Show BGP",
+            "description": "Show BGP summary for a given host",
+            "tags": ["routing", "bgp", "status"],
+            "inputs_schema": {"type": "object", "properties": {"host": host_prop}, "required": ["host"]},
+            "examples": ["r1のBGPの状態は？"],
+            "version": "v1"
+        },
+        {
+            "id": "playbooks/show_ospf.yml",
+            "title": "Show OSPF",
+            "description": "Show OSPF neighbors for a given host",
+            "tags": ["routing", "ospf", "status"],
+            "inputs_schema": {"type": "object", "properties": {"host": host_prop}, "required": ["host"]},
+            "examples": ["r2のOSPFの状態は？"],
+            "version": "v1"
+        },
+    ]
+
+@app.get("/tools/tags")
+def tools_tags():
+    body = {"ok": True, "tags": TAG_TAXONOMY, "ts_jst": _now_jst(), "server_version": SERVER_VERSION}
+    return JSONResponse(body)
+
+@app.get("/tools/list")
+def tools_list():
+    """Return catalog of available tools/playbooks with JSON Schema for inputs."""
+    tools = _tools_catalog()
+    body = {"ok": True, "tools": tools, "ts_jst": _now_jst(), "server_version": SERVER_VERSION}
+    return JSONResponse(body)
 
 # --- RAG: knowledge-driven host/playbook selection ---
 _KB_PLAYBOOK_MAP = (BASE_DIR / 'knowledge' / 'playbook_map.yaml').resolve()
@@ -156,6 +300,12 @@ async def run(request: Request):
         return resp
 
     body = await request.json()
+    # capture request_id for correlation (if provided by client)
+    global _REQ_ID
+    try:
+        _REQ_ID = body.get("request_id") if isinstance(body, dict) else None
+    except Exception:
+        _REQ_ID = None
     _mcp_log(6, "mcp request", {"body": body})
 
     text = body.get("text", "")
@@ -174,12 +324,10 @@ async def run(request: Request):
     if not pb_path.is_absolute():
         pb_path = (BASE_DIR / pb_path).resolve()
     if not pb_path.exists():
-        err = {
-            "ok": False, "error": f"playbook not found: {pb_path}",
-            "hint": "COPY playbooks/ into the image", "ts_jst": _now_jst()
-        }
-        _mcp_log(11, "mcp reply", {"status": 400, **err})
-        return JSONResponse(err, status_code=400)
+        details = {"path": str(pb_path)}
+        err_resp = _err_payload("unknown_tool", f"playbook not found: {pb_path}", details=details, status=400)
+        _mcp_log(11, "mcp reply", {"status": 400, "error": {"code": "unknown_tool", "message": f"playbook not found: {pb_path}", "details": details}})
+        return err_resp
 
     extra_vars = {"host": plan["host"], "feature": plan["feature"], "score": score, "decision": decision}
     user_vars = payload.get("vars") if isinstance(payload, dict) else None
@@ -199,6 +347,8 @@ async def run(request: Request):
         summary = f"Playbook 提案: {pb_path.name}（feature={plan['feature']}）"
         resp = {"ok": True, "decision": decision, "summary": summary, "score": score,
                 "ansible": {"rc": 0, "ok": True}, "ts_jst": _now_jst(), "debug": dbg}
+        if _REQ_ID:
+            resp["request_id"] = _REQ_ID
         _mcp_log(11, "mcp reply", {"status": 200, "summary": summary, "intent": "propose_create"})
         return resp
 
@@ -213,6 +363,8 @@ async def run(request: Request):
     debug["no10_output"] = {"summary": summary}
     resp = {"ok": True, "decision": decision, "summary": summary, "score": score,
             "ansible": {"rc": reply["rc"], "ok": reply["ok"]}, "ts_jst": _now_jst(), "debug": debug}
+    if _REQ_ID:
+        resp["request_id"] = _REQ_ID
     _mcp_log(10, "mcp gpt output", {"summary": summary})
     _mcp_log(11, "mcp reply", {"status": 200, "summary": summary, "ansible_rc": reply["rc"]})
     return resp
