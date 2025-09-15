@@ -73,18 +73,6 @@ def _coerce_req_id_from(request: Request, body: dict | None) -> str:
 # ---- Tools/tags registry ----
 SERVER_VERSION = os.getenv("MCP_SERVER_VERSION", "v1")
 
-TAG_TAXONOMY = [
-    {"id": "inventory", "description": "Topology and assets inventory"},
-    {"id": "count", "description": "Count-oriented outputs"},
-    {"id": "routers", "description": "L3 routers discovery"},
-    {"id": "routing", "description": "Layer-3 routing generic"},
-    {"id": "bgp", "description": "BGP operations"},
-    {"id": "ospf", "description": "OSPF operations"},
-    {"id": "l2", "description": "Layer-2 switching"},
-    {"id": "status", "description": "Operational status"},
-    {"id": "deep", "description": "Deep-dive variants"},
-]
-
 @app.get("/health")
 def health():
     info = {
