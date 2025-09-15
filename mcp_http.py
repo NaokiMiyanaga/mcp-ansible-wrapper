@@ -1,4 +1,4 @@
-import os, json, subprocess, tempfile, re, time
+import os, json, subprocess, tempfile, re, time, uuid
 from pathlib import Path
 from typing import Dict, Any, Optional
 from urllib.parse import urlparse, urlunparse
@@ -59,6 +59,16 @@ async def _auth(request: Request):
     if not MCP_TOKEN or token != MCP_TOKEN:
         return False, _unauth("invalid token")
     return True, None
+
+
+# Helper to coerce request id from body or headers
+def _coerce_req_id_from(request: Request, body: dict | None) -> str:
+    rid = None
+    if isinstance(body, dict):
+        rid = body.get("id") or body.get("request_id")
+    if not rid:
+        rid = request.headers.get("X-Request-Id")
+    return rid or str(uuid.uuid4())
 
 # ---- Tools/tags registry ----
 SERVER_VERSION = os.getenv("MCP_SERVER_VERSION", "v1")
@@ -296,7 +306,7 @@ async def mcp(request: Request):
     body = await request.json()
     global _REQ_ID
     try:
-        _REQ_ID = body.get("request_id") if isinstance(body, dict) else None
+        _REQ_ID = _coerce_req_id_from(request, body)
     except Exception:
         _REQ_ID = None
 
@@ -368,10 +378,10 @@ async def run(request: Request):
         return resp
 
     body = await request.json()
-    # capture request_id for correlation (if provided by client)
+    # capture correlation id (accept JSON id/request_id or X-Request-Id header)
     global _REQ_ID
     try:
-        _REQ_ID = body.get("request_id") if isinstance(body, dict) else None
+        _REQ_ID = _coerce_req_id_from(request, body)
     except Exception:
         _REQ_ID = None
     _mcp_log(6, "mcp request", {"body": body})

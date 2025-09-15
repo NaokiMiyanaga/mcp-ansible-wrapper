@@ -25,13 +25,12 @@ services:
       ANSIBLE_BIN: /usr/local/bin/ansible-playbook 
       DOCKER_HOST: unix:///var/run/docker.sock
     volumes:
-      - /Users/naoki/devNet/mcp-ansible-wrapper/knowledge:/app/knowledge:ro
+      - /Users/naoki/devNet/mcp-ansible-wrapper/knowledge:/app/knowledge:rw
       - /Users/naoki/devNet/mcp-ansible-wrapper/playbooks:/app/playbooks:rw
       - /Users/naoki/devNet/mcp-ansible-wrapper/inventory.ini:/app/inventory.ini:ro
-      - /Users/naoki/devNet/mcp-ansible-wrapper/logs:/app/logs
+      - /Users/naoki/devNet/mcp-ansible-wrapper/logs:/app/logs:rw
       - /Users/naoki/devNet/mcp-ansible-wrapper/mcp_http.py:/app/mcp_http.py:ro
       - /Users/naoki/.orbstack/run/docker.sock:/var/run/docker.sock
-      - /Users/naoki/devNet/mcp-ansible-wrapper/knowledge:/app/knowledge:ro
     restart: unless-stopped
     command: [
       "uvicorn","mcp_http:app",
