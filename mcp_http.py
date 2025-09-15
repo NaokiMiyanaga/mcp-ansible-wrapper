@@ -1,6 +1,7 @@
 import os, json, subprocess, tempfile, re, time
 from pathlib import Path
 from typing import Dict, Any, Optional
+from urllib.parse import urlparse, urlunparse
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from datetime import datetime
@@ -59,18 +60,6 @@ async def _auth(request: Request):
         return False, _unauth("invalid token")
     return True, None
 
-@app.get("/health")
-def health():
-    info = {
-        "ok": True, "ts_jst": _now_jst(),
-        "effective_mode": EFFECTIVE_MODE, "mode_reason": MODE_REASON,
-        "ansible_bin": ANSIBLE_BIN, "require_auth": REQUIRE_AUTH, "token_set": bool(MCP_TOKEN),
-        "base_dir": str(BASE_DIR),
-    }
-    if os.getenv("MCP_LOG_HEALTH", "0") == "1":
-        _mcp_log(-1, "health", info)
-    return info
-
 # ---- Tools/tags registry ----
 SERVER_VERSION = os.getenv("MCP_SERVER_VERSION", "v1")
 
@@ -85,6 +74,20 @@ TAG_TAXONOMY = [
     {"id": "status", "description": "Operational status"},
     {"id": "deep", "description": "Deep-dive variants"},
 ]
+
+@app.get("/health")
+def health():
+    info = {
+        "ok": True,
+        "ts_jst": _now_jst(),
+        "server_version": SERVER_VERSION,
+        "mode": EFFECTIVE_MODE,
+        "mode_reason": MODE_REASON,
+        "ansible_bin": ANSIBLE_BIN,
+        "require_auth": REQUIRE_AUTH,
+        "base_dir": str(BASE_DIR),
+    }
+    return info
 
 # ---- Dynamic enum (routers) discovery with TTL cache ----
 _HOSTS_CACHE: list[str] = []
@@ -192,18 +195,6 @@ def _tools_catalog() -> list[dict]:
         },
     ]
 
-@app.get("/tools/tags")
-def tools_tags():
-    body = {"ok": True, "tags": TAG_TAXONOMY, "ts_jst": _now_jst(), "server_version": SERVER_VERSION}
-    return JSONResponse(body)
-
-@app.get("/tools/list")
-def tools_list():
-    """Return catalog of available tools/playbooks with JSON Schema for inputs."""
-    tools = _tools_catalog()
-    body = {"ok": True, "tools": tools, "ts_jst": _now_jst(), "server_version": SERVER_VERSION}
-    return JSONResponse(body)
-
 # --- RAG: knowledge-driven host/playbook selection ---
 _KB_PLAYBOOK_MAP = (BASE_DIR / 'knowledge' / 'playbook_map.yaml').resolve()
 
@@ -292,6 +283,83 @@ def _run_ansible(playbook: str, extra_vars: Dict[str, Any]) -> Dict[str, Any]:
         "ansible_bin": ANSIBLE_BIN, "playbook": playbook, "vars": extra_vars,
         "stdout": out, "stderr": err, "rc": p.returncode
     }
+
+# --- MCP endpoint: client-style payload compat ---
+
+@app.post("/mcp")
+async def mcp(request: Request):
+    # Same auth guard as /run
+    ok, resp = await _auth(request)
+    if not ok:
+        return resp
+
+    body = await request.json()
+    global _REQ_ID
+    try:
+        _REQ_ID = body.get("request_id") if isinstance(body, dict) else None
+    except Exception:
+        _REQ_ID = None
+
+    # --- normalize shapes: {tool,vars,origin_text} | {name,arguments}
+    tool = body.get("tool") or body.get("name")
+    vars_ = body.get("vars") or body.get("arguments") or {}
+    if not isinstance(vars_, dict):
+        vars_ = {"value": vars_}
+    origin_text = body.get("origin_text") or ""
+    # Allow vars.text to act as a text command too
+    text = origin_text or (vars_.get("text") if isinstance(vars_, dict) else "") or ""
+
+    _mcp_log(6, "mcp request", {"body": {"tool": tool, "vars": vars_, "origin_text": origin_text}})
+
+    # Special lightweight tool: echo
+    if tool == "mcp.test.echo":
+        msg = vars_.get("text") if isinstance(vars_, dict) else ""
+        resp = {"ok": True, "text": msg or "(empty)", "ts_jst": _now_jst()}
+        if _REQ_ID:
+            resp["request_id"] = _REQ_ID
+        _mcp_log(11, "mcp reply", {"status": 200, "summary": "echo"})
+        return JSONResponse(resp, status_code=200)
+
+    # Fallback: treat as /run using text intent + optional vars merge
+    decision = "run"
+    score = 1
+    plan = _plan_from_text(text)
+    _mcp_log(7, "mcp gpt input", {"prompt": text, "decision": decision, "score": score, "plan": plan})
+
+    # Choose playbook (explicit from tool id if it matches a known playbook path, else by plan)
+    explicit_pb = None
+    if isinstance(tool, str) and tool.startswith("playbooks/") and tool.endswith(".yml"):
+        explicit_pb = tool
+    chosen_pb = explicit_pb or plan.get("playbook")
+    pb_path = Path(chosen_pb)
+    if not pb_path.is_absolute():
+        pb_path = (BASE_DIR / pb_path).resolve()
+    if not pb_path.exists():
+        details = {"path": str(pb_path)}
+        err_resp = _err_payload("unknown_tool", f"playbook not found: {pb_path}", details=details, status=400)
+        _mcp_log(11, "mcp reply", {"status": 400, "error": {"code": "unknown_tool", "message": f"playbook not found: {pb_path}", "details": details}})
+        return err_resp
+
+    extra_vars = {"host": plan["host"], "feature": plan["feature"], "score": score, "decision": decision}
+    if isinstance(vars_, dict):
+        extra_vars.update(vars_)
+
+    reply = _run_ansible(str(pb_path), extra_vars)
+    summary = f"ホスト「{extra_vars.get('host')}」の {extra_vars.get('feature')} を {pb_path.name} で確認しました（mode={reply['mode']}）。"
+    dbg = {
+        "no7_plan": {"prompt": text, "decision": decision, "score": score, "plan": plan},
+        "no8_request": {"module": "ansible", "payload": {"playbook": str(pb_path), "vars": extra_vars},
+                        "effective_mode": EFFECTIVE_MODE, "mode_reason": MODE_REASON, "ansible_bin": ANSIBLE_BIN},
+        "no9_reply": reply,
+        "no10_output": {"summary": summary},
+    }
+    resp = {"ok": True, "decision": decision, "summary": summary, "score": score,
+            "ansible": {"rc": reply["rc"], "ok": reply["ok"]}, "ts_jst": _now_jst(), "debug": dbg}
+    if _REQ_ID:
+        resp["request_id"] = _REQ_ID
+    _mcp_log(10, "mcp gpt output", {"summary": summary})
+    _mcp_log(11, "mcp reply", {"status": 200, "summary": summary, "ansible_rc": reply["rc"]})
+    return JSONResponse(resp, status_code=200)
 
 @app.post("/run")
 async def run(request: Request):

@@ -25,14 +25,13 @@ services:
       ANSIBLE_BIN: /usr/local/bin/ansible-playbook 
       DOCKER_HOST: unix:///var/run/docker.sock
     volumes:
-      - ./knowledge:/app/knowledge:ro
-      - ./playbooks:/app/playbooks:ro
-      - ./playbooks:/app/playbooks:rw
-      - ./inventory.ini:/app/inventory.ini:ro   # ← 正解
-      - ./logs:/app/logs
-      - ./mcp_http.py:/app/mcp_http.py:ro   # ★これを追加
-      - ./knowledge:/app/knowledge:ro
+      - /Users/naoki/devNet/mcp-ansible-wrapper/knowledge:/app/knowledge:ro
+      - /Users/naoki/devNet/mcp-ansible-wrapper/playbooks:/app/playbooks:rw
+      - /Users/naoki/devNet/mcp-ansible-wrapper/inventory.ini:/app/inventory.ini:ro
+      - /Users/naoki/devNet/mcp-ansible-wrapper/logs:/app/logs
+      - /Users/naoki/devNet/mcp-ansible-wrapper/mcp_http.py:/app/mcp_http.py:ro
       - /Users/naoki/.orbstack/run/docker.sock:/var/run/docker.sock
+      - /Users/naoki/devNet/mcp-ansible-wrapper/knowledge:/app/knowledge:ro
     restart: unless-stopped
     command: [
       "uvicorn","mcp_http:app",
@@ -43,12 +42,12 @@ services:
       "--access-log",
       "--log-level","info"
     ]
-    healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:9000/health"]
-      interval: 10s
-      timeout: 2s
-      retries: 5
-      start_period: 10s   # ← これを追加
+#    healthcheck:
+#      test: ["CMD", "curl", "-sf", "http://localhost:9000/health"]
+#      interval: 10s
+#      timeout: 2s
+#      retries: 5
+#      start_period: 10s   # ← これを追加
     logging:
       driver: json-file
       options:
