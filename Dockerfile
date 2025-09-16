@@ -15,3 +15,8 @@ ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["bash"]
 
 CMD ["uvicorn", "mcp_http:app", "--host", "0.0.0.0", "--port", "9000", "--proxy-headers", "--access-log", "--log-level", "info"]
+
+# ビルドコンテキストは repo ルート想定
+WORKDIR /app
+COPY mcp-ansible-wrapper/ /app/
+# （もしPythonパッケージなら）COPY pyproject.toml/requirements も併せて

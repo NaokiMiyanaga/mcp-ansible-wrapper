@@ -29,8 +29,6 @@ services:
       - /Users/naoki/devNet/mcp-ansible-wrapper/playbooks:/app/playbooks:rw
       - /Users/naoki/devNet/mcp-ansible-wrapper/inventory.ini:/app/inventory.ini:ro
       - /Users/naoki/devNet/mcp-ansible-wrapper/logs:/app/logs:rw
-      - /Users/naoki/devNet/mcp-ansible-wrapper/mcp_http.py:/app/mcp_http.py:ro
-      - /Users/naoki/devNet/mcp-ansible-wrapper/thinking.py:/app/thinking.py:ro
       - /Users/naoki/.orbstack/run/docker.sock:/var/run/docker.sock
     restart: unless-stopped
     command: [
