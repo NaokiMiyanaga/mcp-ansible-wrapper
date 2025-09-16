@@ -7,23 +7,12 @@ services:
     ports:
       - "9000:9000"
     environment:
-      AUTH_DEBUG: "1"
       REQUIRE_AUTH: "1"   # 開発中はバイパスでOK（本番は必ず戻す）
-      OPENAI_API_KEY: ${OPENAI_API_KEY}
       MCP_TOKEN: "secret123"     
-      MCP_API_TOKEN: ${MCP_TOKEN:-secret123}
-      MCP_ALLOW: ${MCP_ALLOW:-playbooks/*.yml}
-      MCP_WORKDIR: ${MCP_WORKDIR:-/app}
-      MCP_TOOLS_ENUM_MODE: "auto"
-      MCP_TOOLS_ENUM_FALLBACK: "r1,r2"
-      MCP_TOOLS_ENUM_TTL: "5"
-      LOG_DIR: /app/logs
-      LOG_JSONL: "1"
-      OPENAI_MODEL_PLAN: gpt-4o-mini
-      OPENAI_MODEL_SUM: gpt-4o-mini
-      ANSIBLE_RUN: exec
+      MCP_SERVER_VERSION: v1
+      MCP_LOG_DIR: /app/logs
       ANSIBLE_BIN: /usr/local/bin/ansible-playbook 
-      DOCKER_HOST: unix:///var/run/docker.sock
+      ANSIBLE_INVENTORY: /app/inventory.ini
     volumes:
       - /Users/naoki/devNet/mcp-ansible-wrapper/knowledge:/app/knowledge:rw
       - /Users/naoki/devNet/mcp-ansible-wrapper/playbooks:/app/playbooks:rw
