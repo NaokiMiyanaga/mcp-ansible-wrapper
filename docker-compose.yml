@@ -6,6 +6,8 @@ services:
     container_name: mcp
     ports:
       - "9000:9000"
+    env_file:
+      - ./.env
     environment:
       REQUIRE_AUTH: "1"   # 開発中はバイパスでOK（本番は必ず戻す）
       MCP_TOKEN: "secret123"     
