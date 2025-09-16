@@ -17,6 +17,22 @@ EFFECTIVE_MODE = "exec" if Path(ANSIBLE_BIN).exists() else "dry"
 MODE_REASON = "exec: ansible present" if EFFECTIVE_MODE == "exec" else "dry: ansible not found"
 BASE_DIR = Path(__file__).resolve().parent
 
+_START_TS = datetime.now(ZoneInfo("Asia/Tokyo")).strftime("%Y%m%d-%H%M%S")
+_MCP_LOG_DIR = Path(os.getenv("MCP_LOG_DIR", "/app/logs")).resolve()
+_MCP_LOG_DIR.mkdir(parents=True, exist_ok=True)
+_MCP_LOG_FILE = _MCP_LOG_DIR / f"mcp_events_{_START_TS}.jsonl"
+
+def _now_jst():
+    return datetime.now(ZoneInfo("Asia/Tokyo")).isoformat()
+
+def _mcp_log(id: str, no: int, tag: str, content: Any):
+    rec = {"id": id, "ts_jst": _now_jst(), "no": no, "actor": "mcp", "tag": tag, "content": content}
+    try:
+        with _MCP_LOG_FILE.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+
 app = FastAPI(title="MCP")
 
 def _coerce_req_id_from(request: Request, body: dict | None) -> str:

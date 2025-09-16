@@ -1,0 +1,19 @@
+- intent: "show_bgp"
+  description: "Check BGP state on a router"
+  keywords: ["bgp", "routing", "経路", "ルーティング"]
+  playbook: "playbooks/show_bgp.yml"
+  default_vars:
+    feature: "bgp"
+  examples:
+    - "bgp check"
+    - "show bgp status"
+
+- intent: "interface_status"
+  description: "Check interface operational status"
+  keywords: ["interface", "port", "link", "if", "インタフェース", "ポート"]
+  playbook: "playbooks/show_interfaces.yml"
+  default_vars:
+    feature: "interfaces"
+  examples:
+    - "show ports"
+    - "リンク状態確認"
