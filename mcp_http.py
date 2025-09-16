@@ -19,10 +19,8 @@ _REQ_ID: Optional[str] = None
 def _now_jst():
     return datetime.now(ZoneInfo("Asia/Tokyo")).isoformat()
 
-def _mcp_log(no: int, tag: str, content: Any):
-    rec = {"ts_jst": _now_jst(), "no": no, "actor": "mcp", "tag": tag, "content": content}
-    if _REQ_ID:
-        rec["request_id"] = _REQ_ID
+def _mcp_log(id: str, no: int, tag: str, content: Any):
+    rec = {"id": id, "ts_jst": _now_jst(), "no": no, "actor": "mcp", "tag": tag, "content": content}
     try:
         with _MCP_LOG_FILE.open("a", encoding="utf-8") as f:
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")
@@ -69,14 +67,15 @@ def _coerce_req_id_from(request: Request, body: dict | None) -> str:
         rid = body.get("id") or body.get("request_id")
     if not rid:
         rid = request.headers.get("X-Request-Id")
-    return rid or str(uuid.uuid4())
+#    return rid or str(uuid.uuid4())
+    return rid
 
 # ---- Tools/tags registry ----
 SERVER_VERSION = os.getenv("MCP_SERVER_VERSION", "v1")
 
 @app.get("/health")
 async def health(request: Request):
-    rid = request.get("id") or request.get("request_id")
+    rid = _coerce_req_id_from(request, None)
     info = {
         "ok": True,
         "ts_jst": _now_jst(),
@@ -86,7 +85,7 @@ async def health(request: Request):
         "mode_reason": MODE_REASON,
         "ansible_bin": ANSIBLE_BIN,
         "require_auth": REQUIRE_AUTH,
-        "base_dir": str(BASE_DIR),
+        "base_dir": str(BASE_DIR)
     }
     return info
 
@@ -103,10 +102,10 @@ def _run_ansible(playbook: str, extra_vars: Dict[str, Any]) -> Dict[str, Any]:
         ev = f.name
     inv = str(Path(os.getenv("ANSIBLE_INVENTORY", "/app/inventory.ini")).resolve())
     cmd = [ANSIBLE_BIN, playbook, "-i", inv, "-e", f"@{ev}"]
-    _mcp_log(8, "mcp ansible request", {"cmd": cmd})
+    _mcp_log(_REQ_ID, 8, "mcp ansible request", {"cmd": cmd})
     p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     out, err = p.communicate()
-    _mcp_log(9, "mcp ansible reply", {"rc": p.returncode, "stdout": out[:4000], "stderr": err[:2000]})
+    _mcp_log(_REQ_ID, 9, "mcp ansible reply", {"rc": p.returncode, "stdout": out[:4000], "stderr": err[:2000]})
     return {
         "ok": p.returncode == 0, "mode": EFFECTIVE_MODE, "mode_reason": MODE_REASON,
         "ansible_bin": ANSIBLE_BIN, "playbook": playbook, "vars": extra_vars,
@@ -137,7 +136,7 @@ async def mcp(request: Request):
         vars_ = {"value": vars_}
     origin_text = body.get("origin_text") or ""
 
-    _mcp_log(6, "mcp request", {"body": {"tool": tool, "vars": vars_, "origin_text": origin_text}})
+    _mcp_log(_REQ_ID, 6, "mcp request", {"body": {"tool": tool, "vars": vars_, "origin_text": origin_text}})
 
     # 1) Lightweight tool: echo (no Ansible)
     if tool == "mcp.test.echo":
@@ -145,7 +144,7 @@ async def mcp(request: Request):
         resp = {"ok": True, "text": msg or "(empty)", "ts_jst": _now_jst()}
         if _REQ_ID:
             resp["request_id"] = _REQ_ID
-        _mcp_log(11, "mcp reply", {"status": 200, "summary": "echo"})
+        _mcp_log(_REQ_ID, 11, "mcp reply", {"status": 200, "summary": "echo"})
         return JSONResponse(resp, status_code=200)
 
     # 2) Explicit playbook execution only (no planning)
@@ -156,7 +155,7 @@ async def mcp(request: Request):
         if not pb_path.exists():
             details = {"path": str(pb_path)}
             err_resp = _err_payload("unknown_tool", f"playbook not found: {pb_path}", details=details, status=400)
-            _mcp_log(11, "mcp reply", {"status": 400, "error": {"code": "unknown_tool", "message": f"playbook not found: {pb_path}", "details": details}})
+            _mcp_log(_REQ_ID, 11, "mcp reply", {"status": 400, "error": {"code": "unknown_tool", "message": f"playbook not found: {pb_path}", "details": details}})
             return err_resp
 
         # Use provided vars as-is
@@ -173,15 +172,16 @@ async def mcp(request: Request):
 
         dbg = {"request": {"tool": tool, "vars": extra_vars}, "ansible": reply}
         resp = {"ok": True, "summary": summary, "ansible": {"rc": reply["rc"], "ok": reply["ok"]}, "ts_jst": _now_jst(), "debug": dbg}
+        resp["rid_debug"] = diag_ids
         if _REQ_ID:
             resp["request_id"] = _REQ_ID
-        _mcp_log(11, "mcp reply", {"status": 200, "summary": summary, "ansible_rc": reply["rc"]})
+        _mcp_log(_REQ_ID, 11, "mcp reply", {"status": 200, "summary": summary, "ansible_rc": reply["rc"]})
         return JSONResponse(resp, status_code=200)
 
     # 3) Unsupported tool (no implicit planning)
     details = {"tool": tool}
     err_resp = _err_payload("unsupported_tool", f"unsupported tool for /mcp: {tool}", details=details, status=400)
-    _mcp_log(11, "mcp reply", {"status": 400, "error": {"code": "unsupported_tool", "message": f"unsupported tool for /mcp: {tool}", "details": details}})
+    _mcp_log(_REQ_ID, 11, "mcp reply", {"status": 400, "error": {"code": "unsupported_tool", "message": f"unsupported tool for /mcp: {tool}", "details": details}})
     return err_resp
 
 @app.post("/run")
@@ -197,7 +197,7 @@ async def run(request: Request):
         _REQ_ID = _coerce_req_id_from(request, body)
     except Exception:
         _REQ_ID = None
-    _mcp_log(6, "mcp request", {"body": body})
+    _mcp_log(_REQ_ID, 6, "mcp request", {"body": body})
 
     text = body.get("text", "")
     decision = body.get("decision", "run")
@@ -207,7 +207,7 @@ async def run(request: Request):
     intent = body.get("intent") or "run"
 
     plan = _plan_from_text(text)
-    _mcp_log(7, "mcp gpt input", {"prompt": text, "decision": decision, "score": score, "plan": plan})
+    _mcp_log(_REQ_ID, 7, "mcp gpt input", {"prompt": text, "decision": decision, "score": score, "plan": plan})
     explicit_pb: Optional[str] = payload.get("playbook") if isinstance(payload, dict) else None
     chosen_pb = explicit_pb or (candidates[0] if candidates else None) or plan.get("playbook")
 
@@ -217,7 +217,7 @@ async def run(request: Request):
     if not pb_path.exists():
         details = {"path": str(pb_path)}
         err_resp = _err_payload("unknown_tool", f"playbook not found: {pb_path}", details=details, status=400)
-        _mcp_log(11, "mcp reply", {"status": 400, "error": {"code": "unknown_tool", "message": f"playbook not found: {pb_path}", "details": details}})
+        _mcp_log(_REQ_ID, 11, "mcp reply", {"status": 400, "error": {"code": "unknown_tool", "message": f"playbook not found: {pb_path}", "details": details}})
         return err_resp
 
     extra_vars = {"host": plan["host"], "feature": plan["feature"], "score": score, "decision": decision}
@@ -240,7 +240,7 @@ async def run(request: Request):
                 "ansible": {"rc": 0, "ok": True}, "ts_jst": _now_jst(), "debug": dbg}
         if _REQ_ID:
             resp["request_id"] = _REQ_ID
-        _mcp_log(11, "mcp reply", {"status": 200, "summary": summary, "intent": "propose_create"})
+        _mcp_log(_REQ_ID, 11, "mcp reply", {"status": 200, "summary": summary, "intent": "propose_create"})
         return resp
 
     reply = _run_ansible(str(pb_path), extra_vars)
@@ -256,6 +256,6 @@ async def run(request: Request):
             "ansible": {"rc": reply["rc"], "ok": reply["ok"]}, "ts_jst": _now_jst(), "debug": debug}
     if _REQ_ID:
         resp["request_id"] = _REQ_ID
-    _mcp_log(10, "mcp gpt output", {"summary": summary})
-    _mcp_log(11, "mcp reply", {"status": 200, "summary": summary, "ansible_rc": reply["rc"]})
+    _mcp_log(_REQ_ID, 10, "mcp gpt output", {"summary": summary})
+    _mcp_log(_REQ_ID, 11, "mcp reply", {"status": 200, "summary": summary, "ansible_rc": reply["rc"]})
     return resp
