@@ -1,9 +1,10 @@
 services:
-  mcp:
+  ansible-mcp:
+    image: ansible-mcp
     build:
       context: .
       dockerfile: Dockerfile.mcp
-    container_name: mcp
+    container_name: ansible-mcp
     ports:
       - "9000:9000"
     env_file:
@@ -31,12 +32,6 @@ services:
       "--access-log",
       "--log-level","info"
     ]
-#    healthcheck:
-#      test: ["CMD", "curl", "-sf", "http://localhost:9000/health"]
-#      interval: 10s
-#      timeout: 2s
-#      retries: 5
-#      start_period: 10s   # ← これを追加
     logging:
       driver: json-file
       options:

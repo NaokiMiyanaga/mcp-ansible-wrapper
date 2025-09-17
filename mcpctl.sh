@@ -5,7 +5,7 @@ set -euo pipefail
 # Usage: ./mcpctl.sh [start|stop|restart|status|logs [svc]|health|run [json]|rebuild]
 
 COMPOSE_FILE="docker-compose.yml"
-SERVICE="mcp"
+SERVICE="ansible-mcp"
 PORT="9000"
 
 # auto-load .env if present
