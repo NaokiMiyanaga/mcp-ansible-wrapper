@@ -96,6 +96,7 @@ rebuild() {
   read -r -p "This will DESTROY and rebuild the MCP service. Continue? [y/N] " ans
   [[ "$ans" =~ ^[Yy]$ ]] || { echo "Aborted."; exit 1; }
   stop
+  compose build rm -f -v || true
   echo "[+] Rebuild --no-cache"
   compose build --no-cache "$SERVICE"
   start

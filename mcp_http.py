@@ -313,7 +313,17 @@ async def tools_call(request: Request):
             summary = f"ホスト「{host}」の {feature} を {pb_path.name} で確認しました（mode={reply['mode']}）。"
         else:
             summary = f"{pb_path.name} 実行（mode={reply['mode']}）"
-        result = {"summary": summary, "ansible": {"rc": reply["rc"], "ok": reply["ok"]}}
+        result = {
+            "summary": summary,
+            "ansible": {
+                "rc": reply["rc"],
+                "ok": reply["ok"],
+                "mode": reply.get("mode"),
+                "mode_reason": reply.get("mode_reason"),
+                "stdout": reply.get("stdout", ""),
+                "stderr": reply.get("stderr", ""),
+            },
+        }
         resp = {"ok": True, "id": rid, "ts_jst": _now_jst(), "result": result}
         if _REQ_ID:
             resp["request_id"] = _REQ_ID
@@ -338,7 +348,17 @@ async def tools_call(request: Request):
             summary = f"ホスト「{host}」の {feature} を {pb_path.name} で確認しました（mode={reply['mode']}）。"
         else:
             summary = f"{pb_path.name} 実行（mode={reply['mode']}）"
-        result = {"summary": summary, "ansible": {"rc": reply["rc"], "ok": reply["ok"]}}
+        result = {
+            "summary": summary,
+            "ansible": {
+                "rc": reply["rc"],
+                "ok": reply["ok"],
+                "mode": reply.get("mode"),
+                "mode_reason": reply.get("mode_reason"),
+                "stdout": reply.get("stdout", ""),
+                "stderr": reply.get("stderr", ""),
+            },
+        }
         resp = {"ok": True, "id": rid, "ts_jst": _now_jst(), "result": result}
         if _REQ_ID:
             resp["request_id"] = _REQ_ID
@@ -409,9 +429,46 @@ async def mcp(request: Request):
 
     # 2-a) Select playbook (planner, RAG-backed) — return plan only, do not execute
     if tool == "ansible.select_playbook":
-        action = safe_lower(vars_.get("action")) if isinstance(vars_, dict) else ""
-        host = (vars_.get("host") if isinstance(vars_, dict) else None) or "r1"
         extra_vars = dict(vars_) if isinstance(vars_, dict) else {}
+        action = safe_lower(extra_vars.get("action")) if extra_vars else ""
+        host = (extra_vars.get("host") if isinstance(extra_vars.get("host"), str) else None) or "r1"
+
+        explicit_playbook = extra_vars.get("playbook")
+        if isinstance(explicit_playbook, str) and explicit_playbook.strip():
+            playbook_path = explicit_playbook.strip()
+            cleaned_vars = {k: v for k, v in extra_vars.items() if k != "action"}
+            cleaned_vars.setdefault("playbook", playbook_path)
+            cleaned_vars.setdefault("host", host)
+
+            plan = {
+                "playbook": playbook_path,
+                "extra_vars": cleaned_vars,
+                "score": 1.0,
+                "intent": extra_vars.get("intent") or action or None,
+            }
+
+            resp = {
+                "ok": True,
+                "summary": f"Selected {Path(playbook_path).name}",
+                "plan": plan,
+                "candidates": [
+                    {
+                        "intent": extra_vars.get("intent") or action or None,
+                        "playbook": playbook_path,
+                        "score": 1.0,
+                    }
+                ],
+                "ts_jst": _now_jst(),
+            }
+            if _REQ_ID:
+                resp["request_id"] = _REQ_ID
+            _mcp_log(
+                _REQ_ID,
+                11,
+                "ansible-mcp reply",
+                {"status": 200, "summary": resp["summary"], "plan": plan},
+            )
+            return JSONResponse(resp, status_code=200)
 
         candidates = search_playbook(action, BASE_DIR, topk=5)
         chosen_item = None
