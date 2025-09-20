@@ -1,11 +1,13 @@
 FROM python:3.11-slim
 
-WORKDIR /app
-COPY . /app
-RUN pip install --no-cache-dir -r /app/requirements.txt
+WORKDIR /app/ansible-mcp
+# COPY . /app
+# RUN pip install --no-cache-dir -r /app/ansible-mcp/requirements.txt
+RUN pip install --no-cache-dir fastapi uvicorn[standard] ansible docker PyYAML jsonschema openai httpx
+
 RUN ansible-galaxy collection install community.docker -p /app/collections
 
-ENV LOG_DIR=/app/logs
+ENV LOG_DIR=/app/ansible-mcp/logs
 RUN mkdir -p $LOG_DIR
 
 # Install docker CLI via Docker official apt repo (CLI only; no daemon)

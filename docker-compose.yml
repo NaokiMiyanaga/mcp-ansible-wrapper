@@ -5,28 +5,24 @@ services:
       context: .
       dockerfile: Dockerfile.mcp
     container_name: ansible-mcp
+    working_dir: /app/ansible-mcp
     ports:
       - "9000:9000"
-
-    # NOTE: .env is no longer used.
-    # Inject any secrets at runtime, e.g.:
-    #   MCP_TOKEN=realvalue docker compose up -d --build
-    # env_file:
-    #   - ./.env
 
     environment:
       REQUIRE_AUTH: "1"        # 開発でバイパスするなら 0、本番は 1
       MCP_TOKEN: "secret123"   # ← 固定で良ければこのまま。毎回注入するなら消してOK
       MCP_SERVER_VERSION: v1
-      MCP_LOG_DIR: /app/logs
+      MCP_LOG_DIR: /app/ansible-mcp/logs
       ANSIBLE_BIN: /usr/local/bin/ansible-playbook
-      ANSIBLE_INVENTORY: /app/inventory.ini
+      ANSIBLE_INVENTORY: /app/ansible-mcp/inventory.ini
     volumes:
-      - /Users/naoki/devNet/mcp-ansible-wrapper/knowledge:/app/knowledge:rw
-      - /Users/naoki/devNet/mcp-ansible-wrapper/playbooks:/app/playbooks:rw
-      - /Users/naoki/devNet/mcp-ansible-wrapper/inventory.ini:/app/inventory.ini:ro
-      - /Users/naoki/devNet/mcp-ansible-wrapper/logs:/app/logs:rw
-      - /Users/naoki/.orbstack/run/docker.sock:/var/run/docker.sock
+      - ./:/app/ansible-mcp:rw
+#      - ./knowledge:/app/knowledge:rw
+#      - ./playbooks:/app/playbooks:rw
+#      - ./inventory.ini:/app/inventory.ini:ro
+#      - ./logs:/app/logs:rw
+      - ~/.orbstack/run/docker.sock:/var/run/docker.sock
     restart: unless-stopped
     command:
       [
