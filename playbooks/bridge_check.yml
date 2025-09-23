@@ -1,21 +1,5 @@
 ---
-- name: Linux bridge connectivity and status check
-  hosts: linux_bridge
-  gather_facts: false
-  tasks:
-    - name: Show bridge links
-      ansible.builtin.command: bridge link
-      register: bridge_link
-      changed_when: false
-
-    - name: Show bridge devices (detailed)
-      ansible.builtin.command: ip -d link show type bridge
-      register: bridge_detail
-      failed_when: false
-      changed_when: false
-
-    - name: Print outputs
-      ansible.builtin.debug:
-        msg:
-          - "bridge link:\n{{ bridge_link.stdout | default('') }}"
-          - "ip -d link show type bridge:\n{{ bridge_detail.stdout | default('N/A') }}"
+- hosts: all
+  gather_facts: no
+  vars: {}
+  tasks: []

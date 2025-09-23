@@ -1,26 +1,5 @@
 ---
-- name: Network overview
-  hosts: all
-  gather_facts: false
-
-  vars:
-    routers_list: "{{ groups.get('routers')  | default([]) }}"
-    switches_list: "{{ groups.get('switches') | default([]) }}"
-    hosts_list: "{{ groups.get('hosts')    | default([]) }}"
-
-  tasks:
-    - name: Compose overview (run once)
-      run_once: true
-      delegate_to: localhost
-      vars:
-        summary: |
-          トポロジ概要:
-          - ルータ台数:  {{ routers_list | length }} （{{ routers_list | join(', ') if routers_list else 'なし' }}）
-          - L2SW台数:   {{ switches_list | length }} （{{ switches_list | join(', ') if switches_list else 'なし' }}）
-          - ホスト台数: {{ hosts_list | length }} （{{ hosts_list | join(', ') if hosts_list else 'なし' }}）
-          - 総ノード数: {{ groups['all'] | length }}
-
-          まとめ: ルータ {{ routers_list|length }} 台、L2スイッチ {{ switches_list|length }} 台、
-          ホスト {{ hosts_list|length }} 台で、合計 {{ groups['all']|length }} ノードです。
-      debug:
-        msg: "{{ summary }}"
+- hosts: all
+  gather_facts: no
+  vars: {}
+  tasks: []

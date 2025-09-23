@@ -1,10 +1,5 @@
 ---
-- name: Router count
-  hosts: routers
-  gather_facts: false
-
-  tasks:
-    - name: Show router count (run once)
-      run_once: true
-      debug:
-        msg: "routers = {{ groups['routers'] | length }}"
+- hosts: all
+  gather_facts: no
+  vars: {}
+  tasks: []

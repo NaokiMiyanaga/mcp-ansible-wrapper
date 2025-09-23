@@ -1,16 +1,5 @@
 ---
-- name: Host IP summary
-  hosts: hosts
-  gather_facts: false
-  tasks:
-    - name: IP -br a
-      command: ip -br a
-      register: ipr
-      changed_when: false
-      failed_when: false
-
-    - name: Show result
-      debug:
-        msg: |
-          === {{ inventory_hostname }} ===
-          {{ ipr.stdout }}
+- hosts: all
+  gather_facts: no
+  vars: {}
+  tasks: []
