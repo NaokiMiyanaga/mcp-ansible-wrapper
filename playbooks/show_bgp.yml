@@ -1,9 +1,22 @@
 ---
-- hosts: all
+- hosts: "{{ host | default('all') }}"
   gather_facts: no
-  vars: {}
-  tasks: []
+  vars:
+    want_afis: "{{ afi | default(['ipv4 unicast']) }}"
+  tasks:
+    - name: Gather BGP summary
+      ansible.builtin.import_role:
+        name: bgp_deep
+      vars:
+        want_afis: "{{ want_afis }}"
 
+    - name: Emit BGP summary
+      ansible.builtin.debug:
+        msg:
+          router_id: "{{ bgp_report.router_id | default('unknown') }}"
+          peers_total: "{{ bgp_report.peers_total | default('n/a') }}"
+          peers_established: "{{ bgp_report.peers_established | default('n/a') }}"
+          peers_down: "{{ bgp_report.peers_down | default('n/a') }}"
 
 x_meta:
   intent: show_bgp

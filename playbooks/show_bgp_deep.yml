@@ -1,9 +1,18 @@
 ---
-- hosts: all
+- hosts: "{{ host | default('all') }}"
   gather_facts: no
-  vars: {}
-  tasks: []
+  vars:
+    want_afis: "{{ afi | default(['ipv4 unicast', 'ipv6 unicast']) }}"
+  tasks:
+    - name: Gather BGP deep report
+      ansible.builtin.import_role:
+        name: bgp_deep
+      vars:
+        want_afis: "{{ want_afis }}"
 
+    - name: Emit BGP deep report (JSON)
+      ansible.builtin.debug:
+        msg: "{{ bgp_report }}"
 
 x_meta:
   intent: show_bgp_deep
