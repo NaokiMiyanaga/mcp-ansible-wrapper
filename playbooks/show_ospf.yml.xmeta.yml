@@ -1,10 +1,3 @@
----
-- hosts: all
-  gather_facts: no
-  vars: {}
-  tasks: []
-
-
 x_meta:
   intent: show_ospf
   role: router

@@ -1,13 +1,6 @@
----
-- hosts: all
-  gather_facts: no
-  vars: {}
-  tasks: []
-
-
 x_meta:
-  intent: show_ospf
+  intent: show_ospf_deep
   role: router
-  scope: single
+  scope: multiple
   target_group: routers
   tags: [ospf, neighbor, adjacency, ネイバー, 隣接, lsdb, 経路, ルーティング]

@@ -1,13 +1,6 @@
----
-- hosts: all
-  gather_facts: no
-  vars: {}
-  tasks: []
-
-
 x_meta:
-  intent: show_bgp
+  intent: show_bgp_deep
   role: router
-  scope: single
+  scope: multiple
   target_group: routers
   tags: [bgp, neighbor, ネイバー, ピア, peering, ピアリング, 隣接, 経路, ルーティング]
