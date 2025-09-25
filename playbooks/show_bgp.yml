@@ -7,8 +7,6 @@
     - name: Gather BGP summary
       ansible.builtin.import_role:
         name: bgp_deep
-      vars:
-        want_afis: "{{ want_afis }}"
 
     - name: Emit BGP summary
       ansible.builtin.debug:
@@ -17,10 +15,3 @@
           peers_total: "{{ bgp_report.peers_total | default('n/a') }}"
           peers_established: "{{ bgp_report.peers_established | default('n/a') }}"
           peers_down: "{{ bgp_report.peers_down | default('n/a') }}"
-
-x_meta:
-  intent: show_bgp
-  role: router
-  scope: single
-  target_group: routers
-  tags: [bgp, neighbor, ネイバー, ピア, peering, ピアリング, 隣接, 経路, ルーティング]

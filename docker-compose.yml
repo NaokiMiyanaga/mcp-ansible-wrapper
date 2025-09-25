@@ -22,7 +22,7 @@ services:
 #      - ./playbooks:/app/playbooks:rw
 #      - ./inventory.ini:/app/inventory.ini:ro
 #      - ./logs:/app/logs:rw
-      - ~/.orbstack/run/docker.sock:/var/run/docker.sock
+      - ~/.docker/run/docker.sock:/var/run/docker.sock
     restart: unless-stopped
     command:
       [

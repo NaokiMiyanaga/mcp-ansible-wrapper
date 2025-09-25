@@ -31,33 +31,55 @@
     label: "{{ item.item }}"
   when: which_vtysh.rc == 0
 
+- name: Init formatted AFI report
+  ansible.builtin.set_fact:
+    bgp_afi_report: {}
+  when: which_vtysh.rc == 0
+
+- name: Build formatted AFI report per family
+  ansible.builtin.set_fact:
+    bgp_afi_report: >-
+      {{ bgp_afi_report | combine({
+          item.key: {
+            'accepted_paths': (item.value.acceptedPaths | default(0)),
+            'received_paths': (item.value.receivedPaths | default(0)),
+            'installed_paths': (item.value.installedPaths | default(0)),
+            'rib_count': (item.value.paths | default(0))
+          }
+        })
+      }}
+  loop: "{{ (frr_afi | default({})) | dict2items }}"
+  when: which_vtysh.rc == 0
+
+- name: Cache FRR peers map
+  ansible.builtin.set_fact:
+    frr_peers: "{{ (frr_sum | default({})).get('peers', {}) }}"
+  when: which_vtysh.rc == 0
+
 - name: Build FRR neighbor/route report
   ansible.builtin.set_fact:
     bgp_report:
       impl: "frr"
-      router_id: "{{ frr_sum.routerId | default(frr_sum.routerIdV4) }}"
-      peers_total: "{{ (frr_sum.peers | default({})) | length }}"
+      router_id: >-
+        {{
+          (frr_sum | default({})).get('routerId')
+          or (frr_sum | default({})).get('routerIdV4')
+          or 'unknown'
+        }}
+      peers_total: "{{ (frr_peers | default({})) | length }}"
       peers_established: >-
         {{
-          (frr_sum.peers | dict2items | selectattr('value.state','equalto','Established') | list) | length
+          (frr_peers | default({}) | dict2items | selectattr('value.state','equalto','Established') | list) | length
         }}
       peers_down: >-
         {{
-          (frr_sum.peers | dict2items | rejectattr('value.state','equalto','Established') | list) | length
+          (frr_peers | default({}) | dict2items | rejectattr('value.state','equalto','Established') | list) | length
         }}
       down_list: >-
         {{
-          (frr_sum.peers | dict2items
+          (frr_peers | default({}) | dict2items
             | rejectattr('value.state','equalto','Established')
             | map(attribute='key') | list)
         }}
-      afi: >-
-        {{
-          dict((k, {
-            'accepted_paths': (v.acceptedPaths | default(0)),
-            'received_paths': (v.receivedPaths | default(0)),
-            'installed_paths': (v.installedPaths | default(0)),
-            'rib_count': (v.paths | default(0))
-          }) for k,v in (frr_afi | default({})).items())
-        }}
+      afi: "{{ bgp_afi_report | default({}) }}"
   when: which_vtysh.rc == 0

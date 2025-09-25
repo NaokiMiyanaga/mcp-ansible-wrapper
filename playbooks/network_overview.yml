@@ -1,5 +1,91 @@
 ---
 - hosts: all
   gather_facts: no
-  vars: {}
-  tasks: []
+  tasks:
+    - name: Initialize overview containers
+      ansible.builtin.set_fact:
+        interface_summary: []
+        bgp_summary: {}
+        bgp_overview: {}
+
+    - name: Capture hostname
+      ansible.builtin.command: hostname
+      register: hostname_result
+      changed_when: false
+
+    - name: Detect FRR availability
+      ansible.builtin.command: which vtysh
+      register: which_vtysh
+      changed_when: false
+      failed_when: false
+
+    - name: Gather BGP summary (FRR)
+      ansible.builtin.command: vtysh -c "show bgp summary json"
+      register: bgp_summary_raw
+      changed_when: false
+      failed_when: false
+      when: which_vtysh.rc == 0
+
+    - name: Parse BGP summary JSON
+      ansible.builtin.set_fact:
+        bgp_summary: "{{ bgp_summary_raw.stdout | from_json }}"
+      when:
+        - which_vtysh.rc == 0
+        - (bgp_summary_raw.stdout | default('')) | length > 0
+
+    - name: Build BGP overview metrics
+      ansible.builtin.set_fact:
+        bgp_overview:
+          router_id: "{{ bgp_summary.routerId | default(bgp_summary.get('routerIdV4')) | default('unknown') }}"
+          peers_total: "{{ (bgp_summary.peers | default({})) | length }}"
+          peers_established: "{{ (bgp_summary.peers | default({}) | dict2items | selectattr('value.state','equalto','Established') | list | length) }}"
+          peers_down: "{{ (bgp_summary.peers | default({}) | dict2items | rejectattr('value.state','equalto','Established') | list | length) }}"
+          down_peers: "{{ (bgp_summary.peers | default({}) | dict2items | rejectattr('value.state','equalto','Established') | map(attribute='key') | list) }}"
+      when: bgp_summary | length > 0
+
+    - name: Gather IPv4 addresses
+      ansible.builtin.command: ip -o -4 addr show scope global
+      register: ipv4_addr
+      changed_when: false
+      failed_when: false
+
+    - name: Collect IPv4 interface summary
+      ansible.builtin.set_fact:
+        interface_summary: "{{ interface_summary + [ {'family': 'ipv4', 'ifname': parts[1], 'address': parts[3]} ] }}"
+      vars:
+        parts: "{{ item.split() }}"
+      loop: "{{ ipv4_addr.stdout_lines | default([]) }}"
+      when: parts | length >= 4
+
+    - name: Gather IPv6 addresses
+      ansible.builtin.command: ip -o -6 addr show scope global
+      register: ipv6_addr
+      changed_when: false
+      failed_when: false
+
+    - name: Collect IPv6 interface summary
+      ansible.builtin.set_fact:
+        interface_summary: "{{ interface_summary + [ {'family': 'ipv6', 'ifname': parts[1], 'address': parts[3]} ] }}"
+      vars:
+        parts: "{{ item.split() }}"
+      loop: "{{ ipv6_addr.stdout_lines | default([]) }}"
+      when: parts | length >= 4
+
+    - name: Gather default routes
+      ansible.builtin.command: ip route show default
+      register: default_route
+      changed_when: false
+      failed_when: false
+
+    - name: Assemble network overview entry
+      ansible.builtin.set_fact:
+        network_overview_entry:
+          host: "{{ hostname_result.stdout | default(inventory_hostname) }}"
+          platform: "{{ 'frr' if which_vtysh.rc == 0 else 'linux' }}"
+          default_route: "{{ default_route.stdout_lines | default([]) }}"
+          interfaces: "{{ interface_summary }}"
+          bgp: "{{ bgp_overview | default({}) }}"
+
+    - name: Emit network overview (JSON)
+      ansible.builtin.debug:
+        msg: "{{ network_overview_entry | to_nice_json }}"
