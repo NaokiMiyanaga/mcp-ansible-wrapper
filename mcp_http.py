@@ -184,6 +184,35 @@ async def tools_call(request: Request):
         host = (args.get("host") if isinstance(args, dict) else None) or "r1"
         extra_vars = dict(args) if isinstance(args, dict) else {}
 
+        # --- Direct fallback: if user passed an explicit playbook but no action keyword ---
+        direct_playbook = None
+        if not action:
+            # Accept either explicit "playbook" field or legacy arg
+            dp = extra_vars.get("playbook")
+            if isinstance(dp, str) and dp.strip():
+                direct_playbook = dp.strip()
+        if direct_playbook:
+            intent_name = safe_lower(Path(direct_playbook).stem.replace(".yml", ""))
+            plan = {
+                "playbook": direct_playbook,
+                "extra_vars": {k: v for k, v in extra_vars.items() if k != "action"},
+                "score": 0.0,
+                "intent": intent_name,
+            }
+            plan["extra_vars"].setdefault("host", host)
+            _direct_candidates = [{"intent": intent_name, "playbook": direct_playbook, "score": 0.0}]
+            result = {
+                "summary": f"Selected {Path(plan['playbook']).name} (direct)",
+                "plan": plan,
+                "candidates": _direct_candidates,
+            }
+            resp = {"ok": True, "id": rid, "ts_jst": _now_jst(), "result": result}
+            if _REQ_ID:
+                resp["request_id"] = _REQ_ID
+            _mcp_log(_REQ_ID, 11, "ansible-mcp reply", {"status": 200, "summary": result["summary"], "plan": plan, "candidates": _direct_candidates, "mode": "direct_playbook"})
+            return JSONResponse(resp, status_code=200)
+
+        # --- Normal similarity search path ---
         candidates = search_playbook(action, BASE_DIR, topk=5)
         chosen_item = None
         if candidates:
@@ -195,7 +224,7 @@ async def tools_call(request: Request):
                 chosen_item = candidates[0]
 
         if not chosen_item:
-            details = {"received": args, "hint": "add to knowledge/playbook_index.yaml"}
+            details = {"received": args, "hint": "add to knowledge/playbook_index.yaml or supply playbook field"}
             err = _err_payload("no_plan", f"no playbook matched for action='{action}'", details=details, status=400)
             _mcp_log(_REQ_ID, 11, "ansible-mcp reply", {"status": 400, "error": {"code": "no_plan", "details": details}})
             return err
@@ -222,7 +251,7 @@ async def tools_call(request: Request):
         resp = {"ok": True, "id": rid, "ts_jst": _now_jst(), "result": result}
         if _REQ_ID:
             resp["request_id"] = _REQ_ID
-        _mcp_log(_REQ_ID, 11, "ansible-mcp reply", {"status": 200, "summary": result["summary"], "plan": plan, "candidates": tops})
+        _mcp_log(_REQ_ID, 11, "ansible-mcp reply", {"status": 200, "summary": result["summary"], "plan": plan, "candidates": tops, "mode": "search"})
         return JSONResponse(resp, status_code=200)
 
     # 2-b) Playbook listing
