@@ -17,3 +17,13 @@
   examples:
     - "show ports"
     - "リンク状態確認"
+
+- intent: "network_overview_with_bgp"
+  description: "Collect network overview (interfaces/routes) and delegate BGP summary for docker routers"
+  keywords: ["overview", "bgp", "inventory", "ネットワーク", "サマリ"]
+  playbook: "playbooks/network_overview.yml"
+  default_vars:
+    feature: "overview"
+  examples:
+    - "network overview"
+    - "bgp overview"

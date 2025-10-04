@@ -22,7 +22,8 @@ services:
 #      - ./playbooks:/app/playbooks:rw
 #      - ./inventory.ini:/app/inventory.ini:ro
 #      - ./logs:/app/logs:rw
-      - ~/.docker/run/docker.sock:/var/run/docker.sock
+      # Docker connection plugin needs host docker daemon socket. On macOS/Linux the canonical path is /var/run/docker.sock
+      - /var/run/docker.sock:/var/run/docker.sock
     restart: unless-stopped
     command:
       [

@@ -1,35 +1,98 @@
 ---
 - hosts: all
-  gather_facts: no
+  gather_facts: false
   tasks:
+    - name: Conditionally gather facts (skip docker connection)
+      ansible.builtin.setup:
+      when: ansible_connection != 'community.docker.docker'
+      changed_when: false
+      failed_when: false
+      tags: ['facts']
+
     - name: Initialize overview containers
       ansible.builtin.set_fact:
         interface_summary: []
         bgp_summary: {}
         bgp_overview: {}
+        host_warnings: []
+        # Provide safe placeholders so later template access does not break when tasks are skipped
+        which_vtysh: { rc: 1 }
+        default_route: { stdout_lines: [] }
 
-    - name: Capture hostname
-      ansible.builtin.command: hostname
-      register: hostname_result
+    - name: Capture hostname (safe, from gathered facts if any)
+      ansible.builtin.set_fact:
+        observed_hostname: "{{ (_candidate_hostnames | select('string') | reject('equalto','') | list)[0] }}"
+      vars:
+        _candidate_hostnames:
+          - "{{ ansible_hostname | default('') }}"
+          - "{{ ansible_fqdn | default('') }}"
+          - "{{ inventory_hostname }}"
       changed_when: false
+      failed_when: false
+
+    - name: Check docker socket on controller
+      delegate_to: localhost
+      ansible.builtin.stat:
+        path: /var/run/docker.sock
+      register: docker_sock
+      changed_when: false
+      failed_when: false
+
+    - name: Try docker-based hostname (optional)
+      when: docker_sock.stat.exists | default(false)
+      delegate_to: localhost
+      ansible.builtin.command: >
+        docker exec {{ inventory_hostname }} hostname
+      register: docker_hostn
+      changed_when: false
+      failed_when: false
+
+    - name: Prefer docker result if available
+      when: docker_hostn.rc is defined and docker_hostn.rc == 0 and (docker_hostn.stdout|length) > 0
+      ansible.builtin.set_fact:
+        observed_hostname: "{{ docker_hostn.stdout }}"
+      changed_when: false
+      failed_when: false
+
+    - name: Build host identity (inventory vs observed)
+      ansible.builtin.set_fact:
+        host_identity:
+          inventory: "{{ inventory_hostname }}"
+          resolved: "{{ observed_hostname | default('') }}"
+          mismatch: "{{ (observed_hostname | default('')) != '' and (observed_hostname | default('')) != inventory_hostname }}"
+      changed_when: false
+      failed_when: false
+
+    - name: Append hostname mismatch warning
+      ansible.builtin.set_fact:
+        host_warnings: "{{ host_warnings + [ 'hostname_mismatch:' + observed_hostname ] }}"
+      when:
+        - host_identity is defined
+        - host_identity.mismatch | default(false)
+
+    # Docker daemon チェックは本 playbook の目的 (ネットワーク概要) に必須ではないため除去。
 
     - name: Detect FRR availability
       ansible.builtin.command: which vtysh
       register: which_vtysh
       changed_when: false
       failed_when: false
+      when: ansible_connection != 'community.docker.docker'
 
     - name: Gather BGP summary (FRR)
       ansible.builtin.command: vtysh -c "show bgp summary json"
       register: bgp_summary_raw
       changed_when: false
       failed_when: false
-      when: which_vtysh.rc == 0
+      when:
+        - ansible_connection != 'community.docker.docker'
+        - which_vtysh.rc == 0
 
     - name: Parse BGP summary JSON
       ansible.builtin.set_fact:
         bgp_summary: "{{ bgp_summary_raw.stdout | from_json }}"
       when:
+        - ansible_connection != 'community.docker.docker'
         - which_vtysh.rc == 0
         - (bgp_summary_raw.stdout | default('')) | length > 0
 
@@ -41,13 +104,16 @@
           peers_established: "{{ (bgp_summary.peers | default({}) | dict2items | selectattr('value.state','equalto','Established') | list | length) }}"
           peers_down: "{{ (bgp_summary.peers | default({}) | dict2items | rejectattr('value.state','equalto','Established') | list | length) }}"
           down_peers: "{{ (bgp_summary.peers | default({}) | dict2items | rejectattr('value.state','equalto','Established') | map(attribute='key') | list) }}"
-      when: bgp_summary | length > 0
+      when:
+        - ansible_connection != 'community.docker.docker'
+        - bgp_summary | length > 0
 
     - name: Gather IPv4 addresses
       ansible.builtin.command: ip -o -4 addr show scope global
       register: ipv4_addr
       changed_when: false
       failed_when: false
+      when: ansible_connection != 'community.docker.docker'
 
     - name: Collect IPv4 interface summary
       ansible.builtin.set_fact:
@@ -55,13 +121,16 @@
       vars:
         parts: "{{ item.split() }}"
       loop: "{{ ipv4_addr.stdout_lines | default([]) }}"
-      when: parts | length >= 4
+      when:
+        - ansible_connection != 'community.docker.docker'
+        - parts | length >= 4
 
     - name: Gather IPv6 addresses
       ansible.builtin.command: ip -o -6 addr show scope global
       register: ipv6_addr
       changed_when: false
       failed_when: false
+      when: ansible_connection != 'community.docker.docker'
 
     - name: Collect IPv6 interface summary
       ansible.builtin.set_fact:
@@ -69,23 +138,84 @@
       vars:
         parts: "{{ item.split() }}"
       loop: "{{ ipv6_addr.stdout_lines | default([]) }}"
-      when: parts | length >= 4
+      when:
+        - ansible_connection != 'community.docker.docker'
+        - parts | length >= 4
 
     - name: Gather default routes
       ansible.builtin.command: ip route show default
       register: default_route
       changed_when: false
       failed_when: false
+      when: ansible_connection != 'community.docker.docker'
+
+    - name: Append docker connection skipped warning
+      ansible.builtin.set_fact:
+        host_warnings: "{{ host_warnings + ['docker_connection_skipped'] }}"
+      when: ansible_connection == 'community.docker.docker'
 
     - name: Assemble network overview entry
       ansible.builtin.set_fact:
         network_overview_entry:
-          host: "{{ hostname_result.stdout | default(inventory_hostname) }}"
-          platform: "{{ 'frr' if which_vtysh.rc == 0 else 'linux' }}"
-          default_route: "{{ default_route.stdout_lines | default([]) }}"
+          host: "{{ inventory_hostname }}"  # inventory_hostname を採用（container hostname 重複回避）
+          platform: "{{ 'frr' if (which_vtysh is defined and (which_vtysh.rc | default(1)) == 0) else 'linux' }}"
+          default_route: "{{ (default_route.stdout_lines if (default_route is defined and default_route.stdout_lines is defined) else []) }}"
           interfaces: "{{ interface_summary }}"
           bgp: "{{ bgp_overview | default({}) }}"
+          warnings: "{{ host_warnings }}"
+          host_identity: "{{ host_identity | default({'inventory': inventory_hostname}) }}"
 
     - name: Emit network overview (JSON)
+      when: ansible_connection != 'community.docker.docker'
+      ansible.builtin.debug:
+        msg: "{{ network_overview_entry | to_nice_json }}"
+
+# Routers (docker connection) – delegate BGP collection via docker exec
+- hosts: routers
+  gather_facts: false
+  tasks:
+    - name: Ensure network_overview_entry base exists
+      ansible.builtin.set_fact:
+        network_overview_entry: "{{ network_overview_entry | default({'host': inventory_hostname, 'platform': 'linux', 'interfaces': [], 'default_route': [], 'warnings': ['docker_connection_skipped'], 'host_identity': {'inventory': inventory_hostname}}) }}"
+      changed_when: false
+      failed_when: false
+
+    - name: Fetch BGP summary via docker exec (json)
+      delegate_to: localhost
+      ansible.builtin.command: >
+        docker exec {{ inventory_hostname }} vtysh -c "show bgp summary json"
+      register: router_bgp_raw
+      changed_when: false
+      failed_when: false
+
+    - name: Parse BGP ipv4Unicast block
+      when: router_bgp_raw.rc == 0 and (router_bgp_raw.stdout | length) > 0
+      ansible.builtin.set_fact:
+        _bgp_unicast: "{{ (router_bgp_raw.stdout | from_json).ipv4Unicast | default({}) }}"
+      changed_when: false
+      failed_when: false
+
+    - name: Build BGP overview metrics (routers)
+      when: _bgp_unicast is defined and _bgp_unicast | length > 0
+      ansible.builtin.set_fact:
+        bgp_overview:
+          router_id: "{{ _bgp_unicast.routerId | default('unknown') }}"
+          asn: "{{ _bgp_unicast.as | default('unknown') }}"
+          peers_total: "{{ _bgp_unicast.totalPeers | default(_bgp_unicast.peerCount | default(0)) }}"
+          peers_established: "{{ (_bgp_unicast.peers | default({}) | dict2items | selectattr('value.state','equalto','Established') | list | length) }}"
+          peers_down: "{{ (_bgp_unicast.peers | default({}) | dict2items | rejectattr('value.state','equalto','Established') | list | length) }}"
+          down_peers: "{{ (_bgp_unicast.peers | default({}) | dict2items | rejectattr('value.state','equalto','Established') | map(attribute='key') | list) }}"
+          peers: "{{ _bgp_unicast.peers | default({}) }}"
+      changed_when: false
+      failed_when: false
+
+    - name: Merge BGP overview into entry
+      when: bgp_overview is defined
+      ansible.builtin.set_fact:
+        network_overview_entry: "{{ network_overview_entry | combine({'bgp': bgp_overview}, recursive=True) }}"
+      changed_when: false
+      failed_when: false
+
+    - name: Emit network overview (JSON) routers
       ansible.builtin.debug:
         msg: "{{ network_overview_entry | to_nice_json }}"
