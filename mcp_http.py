@@ -77,6 +77,64 @@ def _coerce_req_id_from(request: Request, body: dict | None) -> str:
 #    return rid or str(uuid.uuid4())
     return rid
 
+
+def _resolve_playbook_path(identifier: str) -> Optional[Path]:
+    """Best-effort resolution of playbook identifier to filesystem path."""
+    if not isinstance(identifier, str):
+        return None
+    ident = identifier.strip()
+    if not ident:
+        return None
+
+    candidates = []
+    path_obj = Path(ident)
+    if path_obj.is_absolute():
+        candidates.append(path_obj)
+    else:
+        candidates.append((BASE_DIR / path_obj).resolve())
+        if not ident.startswith("playbooks/"):
+            if not ident.endswith(('.yml', '.yaml')):
+                candidates.append((BASE_DIR / "playbooks" / f"{ident}.yml").resolve())
+                candidates.append((BASE_DIR / "playbooks" / f"{ident}.yaml").resolve())
+            else:
+                candidates.append((BASE_DIR / "playbooks" / ident).resolve())
+
+    ident_lower = safe_lower(ident)
+    if ident_lower:
+        try:
+            index = load_playbook_index(BASE_DIR)
+        except Exception:
+            index = []
+        for item in index or []:
+            pb = item.get("playbook")
+            if not pb:
+                continue
+            intent_name = safe_lower(item.get("intent"))
+            stem_name = safe_lower(Path(pb).stem)
+            if ident_lower in (intent_name, stem_name):
+                candidates.append((BASE_DIR / pb).resolve())
+
+    for cand in candidates:
+        try:
+            if cand.exists():
+                return cand
+        except Exception:
+            continue
+    return None
+
+
+def _collect_extra_vars(args: Dict[str, Any]) -> Dict[str, Any]:
+    extra: Dict[str, Any] = {}
+    for key in ("default_vars", "vars", "extra_vars"):
+        val = args.get(key)
+        if isinstance(val, dict):
+            extra.update(val)
+    for key, value in args.items():
+        if key in {"playbook", "path", "default_vars", "vars", "extra_vars"}:
+            continue
+        extra[key] = value
+    return extra
+
 # ---- Tools/tags registry ----
 SERVER_VERSION = os.getenv("MCP_SERVER_VERSION", "v1")
 
@@ -131,6 +189,7 @@ async def tools_list(request: Request):
     tools = [
         {"name": "mcp.test.echo", "description": "Echo text", "input_schema": {"type": "object", "properties": {"text": {"type": "string"}}}},
         {"name": "ansible.playbooks.list", "description": "List playbooks", "input_schema": {"type": "object", "properties": {"q": {"type": "string"}, "include_fs": {"type": "boolean"}}}},
+        {"name": "ansible.playbook", "description": "Run a playbook by intent or name", "input_schema": {"type": "object", "properties": {"playbook": {"type": "string"}, "default_vars": {"type": "object"}}}},
         {"name": "ansible.select_playbook", "description": "Select a candidate playbook for an intent", "input_schema": {"type": "object", "properties": {"action": {"type": "string"}, "host": {"type": "string"}}}},
         {"name": "ansible.inventory", "description": "Show inventory (ansible-inventory --list)", "input_schema": {"type": "object", "properties": {}}},
         {"name": "playbook.run", "description": "Run a playbook (path, vars)", "input_schema": {"type": "object", "properties": {"path": {"type": "string"}, "vars": {"type": "object"}}}},
@@ -322,19 +381,17 @@ async def tools_call(request: Request):
             return err
 
     # 4) Run playbook (standard)
-    if name == "playbook.run":
-        path = args.get("path") or args.get("playbook")
-        if not path:
-            return _json_error("bad_arguments", "missing 'path' for playbook.run", status=400)
-        pb_path = Path(path)
-        if not pb_path.is_absolute():
-            pb_path = (BASE_DIR / pb_path).resolve()
-        if not pb_path.exists():
-            details = {"path": str(pb_path)}
-            err_resp = _err_payload("unknown_tool", f"playbook not found: {pb_path}", details=details, status=400)
-            _mcp_log(_REQ_ID, 11, "ansible-mcp reply", {"status": 400, "error": {"code": "unknown_tool", "message": f"playbook not found: {pb_path}", "details": details}})
+    if name in ("playbook.run", "ansible.playbook"):
+        identifier = args.get("path") or args.get("playbook")
+        if not identifier:
+            return _json_error("bad_arguments", "missing 'path'/'playbook' for playbook execution", status=400)
+        pb_path = _resolve_playbook_path(identifier)
+        if not pb_path:
+            details = {"playbook": identifier}
+            err_resp = _err_payload("unknown_tool", f"playbook not found or unsupported: {identifier}", details=details, status=400)
+            _mcp_log(_REQ_ID, 11, "ansible-mcp reply", {"status": 400, "error": {"code": "unknown_tool", "message": f"playbook not found or unsupported: {identifier}", "details": details}})
             return err_resp
-        extra_vars = dict(args.get("vars", {})) if isinstance(args, dict) else {}
+        extra_vars = _collect_extra_vars(args if isinstance(args, dict) else {})
         reply = _run_ansible(str(pb_path), extra_vars)
         host = extra_vars.get("host")
         feature = extra_vars.get("feature")
@@ -356,7 +413,7 @@ async def tools_call(request: Request):
         resp = {"ok": True, "id": rid, "ts_jst": _now_jst(), "result": result}
         if _REQ_ID:
             resp["request_id"] = _REQ_ID
-        _mcp_log(_REQ_ID, 11, "ansible-mcp reply", {"status": 200, "summary": summary, "ansible_rc": reply["rc"]})
+        _mcp_log(_REQ_ID, 11, "ansible-mcp reply", {"status": 200, "summary": summary, "ansible_rc": reply["rc"], "playbook": str(pb_path)})
         return JSONResponse(resp, status_code=200)
 
     # 5) Direct playbook path (compat)
@@ -614,6 +671,50 @@ async def mcp(request: Request):
             err = _err_payload("inventory_error", "failed to obtain inventory", details=details, status=500)
             _mcp_log(_REQ_ID, 11, "ansible-mcp reply", {"status": 500, "error": details})
             return err
+
+    # 2) Explicit playbook execution via playbook.run / ansible.playbook
+    if tool in ("playbook.run", "ansible.playbook"):
+        identifier = vars_.get("path") or vars_.get("playbook")
+        if not identifier:
+            details = {"vars": vars_}
+            err_resp = _err_payload("bad_arguments", "missing 'path'/'playbook' for playbook execution", details=details, status=400)
+            _mcp_log(_REQ_ID, 11, "ansible-mcp reply", {"status": 400, "error": {"code": "bad_arguments", "details": details}})
+            return err_resp
+
+        pb_path = _resolve_playbook_path(identifier)
+        if not pb_path:
+            details = {"playbook": identifier}
+            err_resp = _err_payload("unknown_tool", f"playbook not found or unsupported: {identifier}", details=details, status=400)
+            _mcp_log(_REQ_ID, 11, "ansible-mcp reply", {"status": 400, "error": {"code": "unknown_tool", "message": f"playbook not found or unsupported: {identifier}", "details": details}})
+            return err_resp
+
+        extra_vars = _collect_extra_vars(vars_ if isinstance(vars_, dict) else {})
+        reply = _run_ansible(str(pb_path), extra_vars)
+        host = extra_vars.get("host")
+        feature = extra_vars.get("feature")
+        if host and feature:
+            summary = f"ホスト「{host}」の {feature} を {pb_path.name} で確認しました（mode={reply['mode']}）。"
+        else:
+            summary = f"{pb_path.name} 実行（mode={reply['mode']}）"
+
+        resp = {
+            "ok": True,
+            "summary": summary,
+            "ansible": {
+                "rc": reply["rc"],
+                "ok": reply["ok"],
+                "mode": reply.get("mode"),
+                "mode_reason": reply.get("mode_reason"),
+                "stdout": reply.get("stdout", ""),
+                "stderr": reply.get("stderr", ""),
+            },
+            "ts_jst": _now_jst(),
+        }
+        if _REQ_ID:
+            resp["request_id"] = _REQ_ID
+        resp["debug"] = {"request": {"tool": tool, "vars": extra_vars}, "ansible": reply}
+        _mcp_log(_REQ_ID, 11, "ansible-mcp reply", {"status": 200, "summary": summary, "ansible_rc": reply["rc"], "playbook": str(pb_path)})
+        return JSONResponse(resp, status_code=200)
 
     # 2) Explicit playbook execution only (no planning)
     if isinstance(tool, str) and tool.startswith("playbooks/") and (tool.endswith(".yml") or tool.endswith(".yaml")):
