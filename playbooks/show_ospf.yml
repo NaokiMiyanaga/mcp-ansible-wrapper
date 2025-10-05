@@ -1,8 +1,18 @@
 ---
-- hosts: all
+- hosts: "{{ host | default('all') }}"
   gather_facts: no
-  vars: {}
-  tasks: []
+  vars:
+    ospf_report_depth: "summary"
+  tasks:
+    - name: Gather OSPF summary
+      ansible.builtin.import_role:
+        name: ospf_report
+      vars:
+        ospf_report_depth: "summary"
+
+    - name: Emit OSPF summary
+      ansible.builtin.debug:
+        msg: "{{ ospf_report }}"
 
 
 x_meta:
@@ -10,4 +20,4 @@ x_meta:
   role: router
   scope: single
   target_group: routers
-  tags: [ospf, neighbor, adjacency, ネイバー, 隣接, lsdb, 経路, ルーティング]
+  tags: [ospf, neighbor, adjacency, summary, routing]

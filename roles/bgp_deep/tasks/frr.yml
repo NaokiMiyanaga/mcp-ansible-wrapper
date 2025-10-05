@@ -83,3 +83,51 @@
         }}
       afi: "{{ bgp_afi_report | default({}) }}"
   when: which_vtysh.rc == 0
+
+- name: Build FRR peer detail list
+  ansible.builtin.set_fact:
+    _frr_peer_detail_list: []
+  when: which_vtysh.rc == 0
+
+- name: Append FRR peer detail list
+  ansible.builtin.set_fact:
+    _frr_peer_detail_list: >-
+      {{ _frr_peer_detail_list + [{
+           'peer': item.key,
+           'hostname': item.value.hostname | default(''),
+           'state': item.value.state | default(''),
+           'remote_as': item.value.remoteAs | default(item.value.remoteAsn | default(None)),
+           'pfx_received': item.value.pfxRcd | default(item.value.prefixReceivedCount | default(None)),
+           'pfx_accepted': item.value.pfxAcc | default(item.value.acceptedPrefixCount | default(None)),
+           'pfx_sent': item.value.pfxSnt | default(item.value.advertisedPrefixCount | default(None)),
+           'local_as': item.value.localAs | default(None),
+           'hold_time': item.value.hold | default(item.value.holdTime | default(None)),
+           'uptime': item.value.peerUptime | default(item.value.upDownTime | default('')),
+           'last_error': item.value.lastError | default('')
+        }]
+      }}
+  loop: "{{ (frr_peers | default({})) | dict2items }}"
+  when: which_vtysh.rc == 0
+
+- name: Gather FRR neighbor detail text
+  ansible.builtin.command: vtysh -c "show bgp neighbors"
+  register: frr_neighbor_text_raw
+  changed_when: false
+  when: which_vtysh.rc == 0
+
+- name: Gather FRR route table text
+  ansible.builtin.command: vtysh -c "show bgp"
+  register: frr_route_text_raw
+  changed_when: false
+  when: which_vtysh.rc == 0
+
+- name: Attach FRR detail previews
+  ansible.builtin.set_fact:
+    bgp_report: >-
+      {{ bgp_report | default({}) | combine({
+           'peers_detail': _frr_peer_detail_list | default([]),
+           'neighbor_detail_text': (frr_neighbor_text_raw.stdout | default(''))[:12000],
+           'route_table_text': (frr_route_text_raw.stdout | default(''))[:12000]
+         })
+      }}
+  when: which_vtysh.rc == 0

@@ -1,0 +1,105 @@
+---
+- name: Gather OSPF summary (FRR JSON)
+  ansible.builtin.command: vtysh -c "show ip ospf json"
+  register: frr_ospf_summary_raw
+  changed_when: false
+  failed_when: false
+  when: ospf_which_vtysh.rc == 0
+
+- name: Parse OSPF summary (FRR)
+  ansible.builtin.set_fact:
+    frr_ospf_summary: "{{ frr_ospf_summary_raw.stdout | from_json }}"
+  when:
+    - ospf_which_vtysh.rc == 0
+    - frr_ospf_summary_raw.rc == 0
+    - (frr_ospf_summary_raw.stdout | length) > 0
+
+- name: Gather OSPF neighbors (FRR JSON)
+  ansible.builtin.command: vtysh -c "show ip ospf neighbor json"
+  register: frr_ospf_neighbors_raw
+  changed_when: false
+  failed_when: false
+  when: ospf_which_vtysh.rc == 0
+
+- name: Parse OSPF neighbors (FRR)
+  ansible.builtin.set_fact:
+    frr_ospf_neighbors: "{{ frr_ospf_neighbors_raw.stdout | from_json }}"
+  when:
+    - ospf_which_vtysh.rc == 0
+    - frr_ospf_neighbors_raw.rc == 0
+    - (frr_ospf_neighbors_raw.stdout | length) > 0
+
+- name: Gather OSPF neighbor text (FRR)
+  ansible.builtin.command: vtysh -c "show ip ospf neighbor"
+  register: frr_ospf_neighbor_text_raw
+  changed_when: false
+  failed_when: false
+  when: ospf_which_vtysh.rc == 0
+
+- name: Build FRR neighbor list
+  ansible.builtin.set_fact:
+    frr_neighbor_list: []
+
+- name: Append FRR neighbor entries (flat)
+  ansible.builtin.set_fact:
+    frr_neighbor_list: >-
+      {{ frr_neighbor_list + [{
+           'neighbor': item.value.get('routerId') or item.value.get('address') or item.key,
+           'address': item.value.get('address') or item.key,
+           'interface': item.value.get('interfaceName') | default(''),
+           'state': item.value.get('state') | default(''),
+           'priority': item.value.get('priority') | default(None),
+           'dead_time': item.value.get('deadTime') | default(item.value.get('deadTimer', None)),
+           'uptime': item.value.get('peerUptime') | default(item.value.get('upDownTime', ''))
+         }]
+      }}
+  loop: "{{ (frr_ospf_neighbors.neighbors | default({})) | dict2items }}"
+  when:
+    - frr_ospf_neighbors is mapping
+    - frr_ospf_neighbors.neighbors is defined
+
+- name: Gather OSPF route text (FRR)
+  ansible.builtin.command: vtysh -c "show ip route ospf"
+  register: frr_ospf_route_text_raw
+  changed_when: false
+  failed_when: false
+  when: ospf_which_vtysh.rc == 0
+
+- name: Gather OSPF database text (FRR deep)
+  ansible.builtin.command: vtysh -c "show ip ospf database"
+  register: frr_ospf_database_text_raw
+  changed_when: false
+  failed_when: false
+  when:
+    - ospf_which_vtysh.rc == 0
+    - ospf_report_depth == 'deep'
+
+- name: Build FRR OSPF report
+  ansible.builtin.set_fact:
+    ospf_report:
+      impl: "frr"
+      router_id: >-
+        {{ (frr_ospf_summary | default({})).get('routerId')
+           or (frr_ospf_summary | default({})).get('routerIdV4')
+           or 'unknown' }}
+      neighbors_total: "{{ frr_neighbor_list | length }}"
+      neighbors_full: >-
+        {{ (frr_neighbor_list | selectattr('state','equalto','Full') | list) | length }}
+      neighbors_down: >-
+        {{ (frr_neighbor_list | rejectattr('state','equalto','Full') | list) | length }}
+      neighbors: "{{ frr_neighbor_list }}"
+      neighbor_detail_text: "{{ (frr_ospf_neighbor_text_raw.stdout | default(''))[:12000] }}"
+      route_table_text: "{{ (frr_ospf_route_text_raw.stdout | default(''))[:12000] }}"
+  when: ospf_which_vtysh.rc == 0
+
+- name: Attach FRR deep data
+  ansible.builtin.set_fact:
+    ospf_report: >-
+      {{ ospf_report | combine({
+           'database_text': (frr_ospf_database_text_raw.stdout | default(''))[:12000]
+         })
+      }}
+  when:
+    - ospf_which_vtysh.rc == 0
+    - ospf_report_depth == 'deep'
+*** End Patch

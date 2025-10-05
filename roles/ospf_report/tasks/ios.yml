@@ -1,0 +1,56 @@
+---
+- name: Gather OSPF neighbor text (IOS)
+  vars:
+    ansible_network_os: ios
+  cisco.ios.ios_command:
+    commands:
+      - show ip ospf neighbor
+  register: ios_ospf_neighbors
+  changed_when: false
+  failed_when: false
+
+- name: Normalize IOS neighbor text
+  ansible.builtin.set_fact:
+    ios_neighbor_text: >-
+      {{ (ios_ospf_neighbors.stdout | default(ios_ospf_neighbors.stdout_lines | default([]))) | join('\n') }}
+
+- name: Parse IOS neighbor summary
+  ansible.builtin.set_fact:
+    ios_neighbor_lines: "{{ ios_neighbor_text.splitlines() | select('match', '^ *[0-9.]+') | list }}"
+    ios_full_count: "{{ ios_neighbor_text | regex_findall(' Full/') | length }}"
+
+- name: Gather IOS deep details
+  vars:
+    ansible_network_os: ios
+  cisco.ios.ios_command:
+    commands: "{{ ['show ip ospf neighbor detail', 'show ip ospf database', 'show ip ospf interface'] if ospf_report_depth == 'deep' else [] }}"
+  register: ios_ospf_deep
+  changed_when: false
+  failed_when: false
+  when: ospf_report_depth == 'deep'
+
+- name: Build IOS OSPF report
+  ansible.builtin.set_fact:
+    ospf_report:
+      impl: "ios"
+      neighbors_total: "{{ ios_neighbor_lines | length }}"
+      neighbors_full: "{{ ios_full_count }}"
+      neighbors_down: "{{ (ios_neighbor_lines | length) - ios_full_count }}"
+      neighbors_summary_text: "{{ ios_neighbor_text[:12000] }}"
+  when: ios_neighbor_text is defined
+
+- name: Attach IOS deep text
+  ansible.builtin.set_fact:
+    ospf_report: >-
+      {{ ospf_report | combine({
+           'neighbor_detail_text': ((ios_ospf_deep.stdout | default([])) | first | default(''))[:12000],
+           'database_text': ((ios_ospf_deep.stdout | default([])) | length > 1
+                              and (ios_ospf_deep.stdout | default([]))[1] or '')[:12000],
+           'interface_text': ((ios_ospf_deep.stdout | default([])) | length > 2
+                               and (ios_ospf_deep.stdout | default([]))[2] or '')[:12000]
+         })
+      }}
+  when:
+    - ospf_report_depth == 'deep'
+    - ios_ospf_deep is defined
+*** End Patch

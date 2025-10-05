@@ -1,0 +1,34 @@
+---
+- name: Detect FRR (vtysh)
+  ansible.builtin.command: which vtysh
+  register: ospf_which_vtysh
+  changed_when: false
+  failed_when: false
+
+- name: Decide platform for OSPF collection
+  ansible.builtin.set_fact:
+    ospf_platform: >-
+      {{
+        (ansible_network_os | default('')) |
+        ternary(ansible_network_os,
+          (ospf_which_vtysh.rc == 0) | ternary('frr','ios'))
+      }}
+
+- name: Ensure depth flag is set
+  ansible.builtin.set_fact:
+    ospf_report_depth: "{{ ospf_report_depth | default('summary') }}"
+
+- ansible.builtin.include_tasks: frr.yml
+  when: ospf_platform in ['frr']
+
+- ansible.builtin.include_tasks: ios.yml
+  when: ospf_platform in ['ios']
+
+- name: Fail when platform unsupported
+  ansible.builtin.fail:
+    msg: "Unsupported platform for ospf_report: {{ ospf_platform | default('unknown') }}"
+  when: ospf_platform is not defined or ospf_platform not in ['frr','ios']
+
+- name: Guarantee ospf_report exists
+  ansible.builtin.set_fact:
+    ospf_report: "{{ ospf_report | default({}) }}"

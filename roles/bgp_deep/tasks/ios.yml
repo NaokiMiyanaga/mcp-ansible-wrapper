@@ -29,3 +29,23 @@
       peers_total: "{{ (ios_stdout_text.splitlines() | select('match','^ *[0-9.]+') | list | length) | int }}"
       peers_established: "{{ (ios_stdout_text | regex_findall(' (?:Estab|[0-9]+:[0-9]+:..)') | length) | int }}"
       peers_down: "{{ ( (ios_stdout_text.splitlines() | select('match','^ *[0-9.]+') | list | length) | int ) - ( (ios_stdout_text | regex_findall(' (?:Estab|[0-9]+:[0-9]+:..)') | length) | int ) }}"
+
+- name: Gather IOS neighbor/route detail text
+  vars:
+    ansible_network_os: ios
+  cisco.ios.ios_command:
+    commands:
+      - show ip bgp neighbors
+      - show ip bgp
+  register: ios_detail_outputs
+  changed_when: false
+  failed_when: false
+
+- name: Attach IOS detail previews
+  set_fact:
+    bgp_report: >-
+      {{ bgp_report | default({}) | combine({
+           'neighbors_detail_text': ((ios_detail_outputs.stdout | default([])) | first | default(''))[:12000],
+           'route_table_text': ((ios_detail_outputs.stdout | default([])) | last | default(''))[:12000]
+         })
+      }}
