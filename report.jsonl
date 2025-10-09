@@ -1,0 +1,4 @@
+{"ts": "2025-10-07T00:04:09.144819Z", "cid": "16682804da2647e0995f2fc52c990145", "exit": 0, "event": "ingest.done", "bgp_rows": 6, "ospf_rows": 6, "hosts": 6}
+{"ts": "2025-10-07T00:49:56.005147Z", "cid": "a687360cc85b4787a3b021bf2b100c40", "exit": 0, "event": "ingest.done", "bgp_rows": 6, "ospf_rows": 6, "hosts": 6}
+{"ts": "2025-10-07T00:53:28.238690Z", "cid": "8abcc0cc1fd14137bc739001585b482f", "exit": 0, "event": "ingest.done", "bgp_rows": 6, "ospf_rows": 6, "hosts": 6}
+{"ts": "2025-10-07T01:18:10.732183Z", "cid": "9a5a7f99aa264131ba630571c3dc1231", "exit": 0, "event": "ingest.done", "bgp_rows": 6, "ospf_rows": 6, "hosts": 6}

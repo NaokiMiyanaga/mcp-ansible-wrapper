@@ -9,40 +9,99 @@ Fetch BGP/OSPF state via Ansible-MCP HTTP API and upsert into a SQLite CMDB.
 - Reads from MCP (default http://127.0.0.1:9000) using tool "ansible.playbook"
 - Extracts JSON from either result.msg or ansible.stdout (JSON per line / embedded)
 - Writes to tables: routing_bgp_peer, routing_ospf_neighbor, routing_summary
-- Works even when 'objects' is a VIEW (uses objects_ext as write table)
+- Also maintains ETL snapshots (raw_state / normalized_state), schema_meta, and summary_diff.
 
-Usage:
+This file is a drop-in patched version that adds:
+- --diff-host / --diff-kind / --set-unordered
+- Structural diff (type-aware, normalized compare) into summary_diff
+- --prune / --keep with safe deletion order and dry-run
+- schema_meta_latest view helper
+
+Usage (examples):
   python3 scripts/mcp_ingest_state.py \
     --db /path/to/rag.db \
-    --token secret123 \
+    --token "$MCP_TOKEN" \
     --mcp-base http://127.0.0.1:9000 \
     --playbook-bgp show_bgp \
     --playbook-ospf show_ospf \
     --verbose
+
+  # diff
+  python3 scripts/mcp_ingest_state.py --db rag.db --diff \
+    --base "2025-10-07T01:20:05.474512Z" --new "2025-10-07T01:53:04.682324Z" \
+    --diff-host R1 --diff-kind bgp_peer --set-unordered --json-log
+
+  # prune keep last 5
+  python3 scripts/mcp_ingest_state.py --db rag.db --prune --keep 5 --json-log
 """
 from __future__ import annotations
+
 import argparse
 import datetime as dt
+import hashlib
 import json
 import os
-import re
 import sqlite3
-import sys
-import uuid
-import time
 import subprocess
-import hashlib
+import sys
+import time
+import urllib.error
+import urllib.request
+import uuid
 from pathlib import Path
-import urllib.request, urllib.error
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Tuple, Iterable
 
+# ---- Exit codes --------------------------------------------------------------
 EXIT_OK = 0
 EXIT_SCHEMA_MISSING = 2
 EXIT_MCP_FAIL = 3
 EXIT_NO_JSON = 4
 EXIT_PREFLIGHT_FAIL = 5
 
-# --- Helper: HTTP GET for MCP health
+# ---- Logger ------------------------------------------------------------------
+class LogHelper:
+    def __init__(self, json_mode: bool, correlation_id: str):
+        self.json_mode = json_mode
+        self.correlation_id = correlation_id
+
+    def log_event(self, level: str, event: str, component: str, step: str, msg: str, **kwargs):
+        payload = {
+            "ts": _iso_now(),
+            "level": level,
+            "component": component,
+            "step": step,
+            "msg": msg,
+            "event": event,
+            "cid": self.correlation_id,
+        }
+        payload.update(kwargs)
+        if self.json_mode:
+            try:
+                print(json.dumps(payload, ensure_ascii=False))
+                return
+            except Exception:
+                pass
+        kvs = " ".join(f"{k}={v}" for k, v in payload.items() if k not in ("ts","level","component","step","msg"))
+        print(f"[{level}] {payload['ts']} {component} {step} {msg} {kvs}".rstrip())
+
+# ---- Misc helpers -------------------------------------------------------------
+def _iso_now() -> str:
+    return dt.datetime.now(dt.UTC).isoformat().replace("+00:00", "Z")
+
+def _sha1_of_file(path: str) -> str | None:
+    try:
+        h = hashlib.sha1()
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(8192), b""):
+                h.update(chunk)
+        return h.hexdigest()
+    except Exception:
+        return None
+
+def _table_exists(conn: sqlite3.Connection, name: str) -> bool:
+    cur = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,))
+    return cur.fetchone() is not None
+
 def _http_get(url: str, timeout: int = 5) -> Tuple[bool, str]:
     try:
         req = urllib.request.Request(url, method="GET")
@@ -51,53 +110,6 @@ def _http_get(url: str, timeout: int = 5) -> Tuple[bool, str]:
             return True, body
     except Exception as e:
         return False, str(e)
-
-def _check_mcp_health(args, logger: LogHelper) -> bool:
-    bases: List[str] = []
-    if isinstance(args.mcp_base, str) and args.mcp_base:
-        bases.append(args.mcp_base.rstrip("/"))
-    for b in _candidate_bases(args.port):
-        if b not in bases:
-            bases.append(b)
-    ok_any = False
-    errors: List[str] = []
-    for b in bases:
-        ok, note = _http_get(b + "/health", timeout=5)
-        if ok:
-            logger.log_event("info", "mcp.health", "preflight", "mcp_health", "MCP health OK", base=b)
-            ok_any = True
-            break
-        else:
-            errors.append(f"{b}: {note}")
-    if not ok_any:
-        logger.log_event("error", "mcp.health.fail", "preflight", "mcp_health", "MCP health check failed", details=" | ".join(errors))
-    return ok_any
-
-def _pick_host(obj: Dict[str, Any], default: str = "unknown") -> str:
-    # Try common flat keys first
-    for k in ("host", "device", "router", "hostname", "node", "target", "inventory_hostname"):
-        v = obj.get(k)
-        if isinstance(v, str) and v.strip():
-            return v.strip()
-    # Look into nested meta-like dicts
-    for meta_key in ("meta", "_meta", "context", "details"):
-        meta = obj.get(meta_key)
-        if isinstance(meta, dict):
-            for k in ("host", "hostname", "device", "router", "node", "inventory_hostname"):
-                v = meta.get(k)
-                if isinstance(v, str) and v.strip():
-                    return v.strip()
-    # Check an "ansible" nested dict if present
-    ans = obj.get("ansible")
-    if isinstance(ans, dict):
-        v = ans.get("inventory_hostname") or ans.get("host")
-        if isinstance(v, str) and v.strip():
-            return v.strip()
-    return default
-
-def _iso_now() -> str:
-    # timezone-aware ISO8601 with Z suffix
-    return dt.datetime.now(dt.UTC).isoformat().replace("+00:00", "Z")
 
 def _http_post_json(url: str, payload: Dict[str, Any], token: str | None, timeout: int = 90) -> Dict[str, Any]:
     data = json.dumps(payload).encode("utf-8")
@@ -116,7 +128,8 @@ def _candidate_bases(port: int) -> List[str]:
     env_first = []
     for k in ("MCP_BASE", "AIOPS_MCP_URL", "AIOPS_MCP_BASE"):
         v = os.getenv(k)
-        if v: env_first.append(v.rstrip("/"))
+        if v:
+            env_first.append(v.rstrip("/"))
     cands = env_first + [
         f"http://127.0.0.1:{port}",
         f"http://host.docker.internal:{port}",
@@ -151,15 +164,11 @@ def _call_playbook(playbook: str, token: str | None, port: int, verbose=False) -
     print(f"[mcp] WARN: call failed playbook={playbook}: {' | '.join(errs)}")
     return None
 
-def _iter_embedded_json(text: str):
-    """
-    Yield JSON objects from a free-form text by scanning for balanced {...} blocks
-    and trying json.loads on them. This avoids Python re (?R) recursion (not supported).
-    """
+# ---- JSON extraction ----------------------------------------------------------
+def _iter_embedded_json(text: str) -> Iterable[Dict[str, Any]]:
     if not text:
         return
-    stack = 0
-    start = None
+    stack = 0; start = None
     for i, ch in enumerate(text):
         if ch == "{":
             if stack == 0:
@@ -176,7 +185,6 @@ def _iter_embedded_json(text: str):
                     except Exception:
                         pass
                     start = None
-    # also consider line-by-line JSON
     for line in text.splitlines():
         try:
             obj = json.loads(line)
@@ -186,7 +194,6 @@ def _iter_embedded_json(text: str):
 
 def _extract_result_objects(result: Dict[str, Any], verbose=False) -> List[Dict[str, Any]]:
     objs: List[Dict[str, Any]] = []
-    # 1) from ".msg" (already JSON or stringified JSON)
     for msglike in (result.get("msg"),):
         if msglike is None: continue
         if isinstance(msglike, dict):
@@ -197,7 +204,6 @@ def _extract_result_objects(result: Dict[str, Any], verbose=False) -> List[Dict[
             except Exception:
                 for obj in _iter_embedded_json(msglike):
                     objs.append(obj)
-    # 2) from "ansible.stdout" (may have JSON per line or blocks)
     stdout = None
     ans = result.get("ansible")
     if isinstance(ans, dict):
@@ -210,51 +216,40 @@ def _extract_result_objects(result: Dict[str, Any], verbose=False) -> List[Dict[
             if isinstance(chunk, str):
                 for obj in _iter_embedded_json(chunk):
                     objs.append(obj)
-    # normalize: unwrap objects shaped like {"msg": "{...json...}"}
+    # unwrap {"msg": "{...}"}
     norm: List[Dict[str, Any]] = []
     for o in objs:
         if isinstance(o, dict) and isinstance(o.get("msg"), str):
             try:
-                inner = json.loads(o["msg"])  # expect keys like host/bgp/ospf
+                inner = json.loads(o["msg"])
                 if isinstance(inner, dict):
-                    norm.append(inner)
-                    continue
+                    norm.append(inner); continue
             except Exception:
                 pass
         norm.append(o)
-    objs = norm
     if verbose:
-        print(f"[parse] extracted {len(objs)} JSON objects")
-    return objs
+        print(f"[parse] extracted {len(norm)} JSON objects")
+    return norm
 
-def _guess_host_from_result(result: Dict[str, Any]) -> str | None:
-    # try common places in the MCP/ansible payload
-    for k in ("host", "hostname", "device", "router", "inventory_hostname", "target"):
-        v = result.get(k)
+# ---- Host guess ---------------------------------------------------------------
+def _pick_host(obj: Dict[str, Any], default: str = "unknown") -> str:
+    for k in ("host","device","router","hostname","node","target","inventory_hostname"):
+        v = obj.get(k)
         if isinstance(v, str) and v.strip():
             return v.strip()
-    ans = result.get("ansible")
-    if isinstance(ans, dict):
-        for k in ("inventory_hostname", "host"):
-            v = ans.get(k)
-            if isinstance(v, str) and v.strip():
-                return v.strip()
-        # sometimes vars lives under ansible["vars"]
-        av = ans.get("vars")
-        if isinstance(av, dict):
-            for k in ("inventory_hostname", "host", "hostname", "device", "router"):
-                v = av.get(k)
-                if isinstance(v, str) and v.strip():
-                    return v.strip()
-    # dig shallow into top-level dicts that look like context
-    for meta_key in ("context", "meta", "_meta", "details"):
-        meta = result.get(meta_key)
+    for meta_key in ("meta","_meta","context","details"):
+        meta = obj.get(meta_key)
         if isinstance(meta, dict):
-            for k in ("host", "hostname", "device", "router", "inventory_hostname"):
+            for k in ("host","hostname","device","router","node","inventory_hostname"):
                 v = meta.get(k)
                 if isinstance(v, str) and v.strip():
                     return v.strip()
-    return None
+    ans = obj.get("ansible")
+    if isinstance(ans, dict):
+        v = ans.get("inventory_hostname") or ans.get("host")
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+    return default
 
 def _as_int(x: Any, default: int = 0) -> int:
     try:
@@ -262,6 +257,7 @@ def _as_int(x: Any, default: int = 0) -> int:
     except Exception:
         return default
 
+# ---- SQL ---------------------------------------------------------------------
 UPSERT_BGP = """
 INSERT INTO routing_bgp_peer(host,peer_ip,peer_as,state,uptime_sec,prefixes_received,collected_at,source)
 VALUES(?,?,?,?,?,?,?,?)
@@ -272,7 +268,6 @@ ON CONFLICT(host,peer_ip,collected_at) DO UPDATE SET
   prefixes_received=excluded.prefixes_received,
   source=excluded.source
 """
-
 UPSERT_OSPF = """
 INSERT INTO routing_ospf_neighbor(host,neighbor_id,iface,state,dead_time_raw,address,collected_at)
 VALUES(?,?,?,?,?,?,?)
@@ -282,7 +277,6 @@ ON CONFLICT(host,neighbor_id,collected_at) DO UPDATE SET
   dead_time_raw=excluded.dead_time_raw,
   address=excluded.address
 """
-
 UPSERT_SUMMARY = """
 INSERT INTO routing_summary(host,last_collected_at,peers_total,peers_established,ospf_neighbors,status,last_error)
 VALUES(?,?,?,?,?,?,?)
@@ -318,121 +312,60 @@ def ensure_schema(conn: sqlite3.Connection):
     );
     """)
 
-def _get_with_aliases(src: Dict[str, Any], aliases: Dict[str, List[str]], canon: str, default: Any = None) -> Any:
-    keys = aliases.get(canon, [canon])
-    for k in keys:
-        if k in src and src[k] not in (None, ""):
-            return src[k]
-    return default
-
-def write_sqlite(db_path: str, bgp_rows: List[Tuple], ospf_rows: List[Tuple], summaries: Dict[str, Tuple], verbose=False, dry_run: bool=False, logger=None):
+def write_sqlite(db_path: str,
+                 bgp_rows: List[Tuple],
+                 ospf_rows: List[Tuple],
+                 summaries: Dict[str, Tuple],
+                 verbose=False,
+                 dry_run: bool=False,
+                 logger: LogHelper | None = None):
     if dry_run:
         if verbose:
             print(f"[dry-run] would upsert bgp={len(bgp_rows)} ospf={len(ospf_rows)} hosts={len(summaries)} -> {db_path}")
-        # Simulate SQL actions
         if logger:
-            logger.log_event("info", "db.dryrun", "db", "write", f"Would upsert bgp={len(bgp_rows)} ospf={len(ospf_rows)} hosts={len(summaries)}", bgp_rows=len(bgp_rows), ospf_rows=len(ospf_rows), hosts=len(summaries))
-            logger.log_event("info", "db.dryrun", "db", "commit", "[dry-run] skipped commit")
+            logger.log_event("info","db.dryrun","db","write",
+                             f"Would upsert bgp={len(bgp_rows)} ospf={len(ospf_rows)} hosts={len(summaries)}",
+                             bgp_rows=len(bgp_rows), ospf_rows=len(ospf_rows), hosts=len(summaries))
+            logger.log_event("info","db.dryrun","db","commit","[dry-run] skipped commit")
         return
     conn = sqlite3.connect(db_path)
     ensure_schema(conn)
     cur = conn.cursor()
-    # cleanup: drop legacy/placeholder summary rows
     cur.execute("DELETE FROM routing_summary WHERE host='unknown'")
-    # never persist placeholder host
     if 'unknown' in summaries:
         if verbose:
             print("[db] skip summary for host=unknown")
-        summaries = {h: t for h, t in summaries.items() if h != 'unknown'}
+        summaries = {h:t for h,t in summaries.items() if h!='unknown'}
     for r in bgp_rows:
         cur.execute(UPSERT_BGP, r)
     for r in ospf_rows:
         cur.execute(UPSERT_OSPF, r)
     for host, tup in summaries.items():
         cur.execute(UPSERT_SUMMARY, tup)
-    if dry_run:
-        if logger:
-            logger.log_event("info", "db.dryrun", "db", "commit", "[dry-run] skipped commit")
-    else:
-        conn.commit()
-        if verbose:
-            print(f"[db] upsert bgp={len(bgp_rows)} ospf={len(ospf_rows)} hosts={len(summaries)} -> {db_path}")
+    conn.commit()
+    if verbose:
+        print(f"[db] upsert bgp={len(bgp_rows)} ospf={len(ospf_rows)} hosts={len(summaries)} -> {db_path}")
     conn.close()
-class LogHelper:
-    def __init__(self, json_mode: bool, correlation_id: str):
-        self.json_mode = json_mode
-        self.correlation_id = correlation_id
-    def log_event(self, level: str, event: str, component: str, step: str, msg: str, **kwargs):
-        # Always include cid
-        payload = {
-            "ts": _iso_now(),
-            "level": level,
-            "component": component,
-            "step": step,
-            "msg": msg,
-            "event": event,
-            "cid": self.correlation_id,
-        }
-        payload.update(kwargs)
-        if self.json_mode:
-            try:
-                import json as _json
-                print(_json.dumps(payload, ensure_ascii=False))
-                return
-            except Exception:
-                pass
-        # fallback text
-        # Compose key=val for extra fields
-        kvs = " ".join(f"{k}={v}" for k, v in payload.items() if k not in ("ts", "level", "component", "step", "msg"))
-        print(f"[{level}] {payload['ts']} {component} {step} {msg} {kvs}".rstrip())
 
-# --- Dispatcher report helpers (JSONL) ---
+# ---- Dispatcher report --------------------------------------------------------
 def _append_report(report_path: str, payload: Dict[str, Any]):
-    """Append one JSON line to report_path; create parent dir if needed."""
     try:
         p = Path(report_path)
         p.parent.mkdir(parents=True, exist_ok=True)
         with p.open("a", encoding="utf-8") as f:
             f.write(json.dumps(payload, ensure_ascii=False) + "\n")
     except Exception:
-        # reporting は副作用なので致命にはしない
         pass
-
 
 def _write_report_if_requested(args, cid: str, exit_code: int, **fields):
     report_path = getattr(args, "report", None)
     if not report_path:
         return
-    payload = {
-        "ts": _iso_now(),
-        "cid": cid,
-        "exit": exit_code,
-        **fields,
-    }
+    payload = {"ts": _iso_now(), "cid": cid, "exit": exit_code, **fields}
     _append_report(report_path, payload)
 
-
-# --- Snapshot and schema_meta helpers ---
-def _table_exists(conn: sqlite3.Connection, name: str) -> bool:
-    cur = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,))
-    return cur.fetchone() is not None
-
-
-def _sha1_of_file(path: str) -> str | None:
-    try:
-        h = hashlib.sha1()
-        with open(path, 'rb') as f:
-            for chunk in iter(lambda: f.read(8192), b''):
-                h.update(chunk)
-        return h.hexdigest()
-    except Exception:
-        return None
-
-
-essential_snapshot_tables = (
-    'raw_state', 'normalized_state'
-)
-
+# ---- Snapshots / schema_meta --------------------------------------------------
+essential_snapshot_tables = ('raw_state','normalized_state')
 
 def _snapshot_raw_and_normalized(conn: sqlite3.Connection,
                                  version: str,
@@ -442,13 +375,11 @@ def _snapshot_raw_and_normalized(conn: sqlite3.Connection,
                                  ospf_rows: List[Tuple],
                                  collected_at: str,
                                  logger: LogHelper | None = None) -> None:
-    # Guard: proceed only if tables exist (no implicit migrations)
     if not all(_table_exists(conn, t) for t in essential_snapshot_tables):
         if logger:
-            logger.log_event("warn", "snapshot.tables.missing", "snapshot", "check", "Snapshot tables not found; skip")
+            logger.log_event("warn","snapshot.tables.missing","snapshot","check","Snapshot tables not found; skip")
         return
     cur = conn.cursor()
-    # raw_state: one row per input object per kind
     raw_bgp = 0
     for o in objs_bgp:
         host = _pick_host(o, "unknown")
@@ -465,12 +396,9 @@ def _snapshot_raw_and_normalized(conn: sqlite3.Connection,
             (version, host, 'ospf', json.dumps(o, ensure_ascii=False), collected_at)
         )
         raw_ospf += 1
-    # normalized_state: from parsed rows
     norm_bgp = 0
     for (host, peer_ip, remote_as, state, uptime_sec, pfx, _ts, _src) in bgp_rows:
-        v = json.dumps({
-            "peer_ip": peer_ip, "remoteAs": remote_as, "state": state, "pfxRcd": pfx
-        }, ensure_ascii=False)
+        v = json.dumps({"peer_ip": peer_ip, "remoteAs": remote_as, "state": state, "pfxRcd": pfx}, ensure_ascii=False)
         cur.execute(
             "INSERT INTO normalized_state(version,host,kind,k,v,created_at) VALUES(?,?,?,?,?,?)",
             (version, host, 'bgp_peer', peer_ip, v, collected_at)
@@ -479,10 +407,8 @@ def _snapshot_raw_and_normalized(conn: sqlite3.Connection,
     norm_ospf = 0
     for (host, neighbor_id, iface, state, dead_time_raw, address, _ts) in ospf_rows:
         key = neighbor_id or address or "-"
-        v = json.dumps({
-            "neighbor_id": neighbor_id, "iface": iface, "state": state,
-            "dead_time_raw": dead_time_raw, "address": address
-        }, ensure_ascii=False)
+        v = json.dumps({"neighbor_id": neighbor_id, "iface": iface, "state": state,
+                        "dead_time_raw": dead_time_raw, "address": address}, ensure_ascii=False)
         cur.execute(
             "INSERT INTO normalized_state(version,host,kind,k,v,created_at) VALUES(?,?,?,?,?,?)",
             (version, host, 'ospf_neighbor', key, v, collected_at)
@@ -490,17 +416,14 @@ def _snapshot_raw_and_normalized(conn: sqlite3.Connection,
         norm_ospf += 1
     conn.commit()
     if logger:
-        logger.log_event("info", "snapshot.ok", "snapshot", "write",
-                         "Snapshot saved",
+        logger.log_event("info","snapshot.ok","snapshot","write","Snapshot saved",
                          raw_bgp=raw_bgp, raw_ospf=raw_ospf,
-                         norm_bgp=norm_bgp, norm_ospf=norm_ospf,
-                         version=version)
+                         norm_bgp=norm_bgp, norm_ospf=norm_ospf, version=version)
 
-
-def _insert_schema_meta(conn: sqlite3.Connection, version: str, schema_sql: str | None, applied_by: str, logger: LogHelper | None = None) -> None:
+def _insert_schema_meta(conn: sqlite3.Connection, version: str, schema_sql: str | None, applied_by: str, logger: LogHelper | None = None):
     if not _table_exists(conn, 'schema_meta'):
         if logger:
-            logger.log_event("warn", "schema_meta.missing", "snapshot", "schema_meta", "schema_meta table not found; skip")
+            logger.log_event("warn","schema_meta.missing","snapshot","schema_meta","schema_meta table not found; skip")
         return
     sha1 = _sha1_of_file(schema_sql) if schema_sql else None
     conn.execute(
@@ -509,17 +432,54 @@ def _insert_schema_meta(conn: sqlite3.Connection, version: str, schema_sql: str 
     )
     conn.commit()
     if logger:
-        logger.log_event("info", "schema_meta.insert.ok", "snapshot", "schema_meta", "schema_meta row inserted", version=version, sha1=(sha1 or ""))
+        logger.log_event("info","schema_meta.insert.ok","snapshot","schema_meta","schema_meta row inserted", version=version, sha1=(sha1 or ""))
+
+# --- schema_meta latest view (for rotation/inspection) ------------------------
+def _ensure_schema_meta_view(conn: sqlite3.Connection):
+    try:
+        conn.execute(
+            """
+            CREATE VIEW IF NOT EXISTS schema_meta_latest AS
+            SELECT * FROM schema_meta
+            ORDER BY datetime(applied_at) DESC, version DESC;
+            """
+        )
+        conn.commit()
+    except Exception:
+        pass
 
 # --- Version diff (summary_diff) ----------------------------------------------
 def _compute_summary_diff(conn: sqlite3.Connection,
                           base_version: str,
                           new_version: str,
                           computed_at: str,
-                          logger: LogHelper | None = None) -> Dict[str, int]:
+                          logger: LogHelper | None = None,
+                          host_filter: str | None = None,
+                          kind_filter: str | None = None,
+                          set_unordered: bool = False) -> Dict[str, int]:
     """Compute deltas between normalized_state of two versions and store into summary_diff.
     Returns counts: {added, removed, changed, total}.
     """
+    # helpers local to this compare
+    def _safe_json_load(s: str):
+        try:
+            return json.loads(s)
+        except Exception:
+            return s
+
+    def _normalize(obj):
+        if isinstance(obj, dict):
+            return {k: _normalize(obj[k]) for k in sorted(obj.keys())}
+        if isinstance(obj, list):
+            if set_unordered:
+                return sorted(json.dumps(_normalize(x), ensure_ascii=False, sort_keys=True) for x in obj)
+            else:
+                return [_normalize(x) for x in obj]
+        return obj
+
+    def _equal(a, b) -> bool:
+        return _normalize(a) == _normalize(b)
+
     if not _table_exists(conn, 'normalized_state') or not _table_exists(conn, 'summary_diff'):
         if logger:
             logger.log_event("warn", "diff.tables.missing", "diff", "check", "normalized_state/summary_diff missing; skip")
@@ -528,20 +488,22 @@ def _compute_summary_diff(conn: sqlite3.Connection,
     cur = conn.cursor()
 
     def load_map(version: str) -> Dict[Tuple[str, str, str], str]:
-        rows = cur.execute(
-            "SELECT host, kind, k, v FROM normalized_state WHERE version=?",
-            (version,)
-        ).fetchall()
+        sql = "SELECT host, kind, k, v FROM normalized_state WHERE version=?"
+        params: List[Any] = [version]
+        if host_filter:
+            sql += " AND host=?"
+            params.append(host_filter)
+        if kind_filter:
+            sql += " AND kind=?"
+            params.append(kind_filter)
+        rows = cur.execute(sql, tuple(params)).fetchall()
         return {(h, kd, k): v for (h, kd, k, v) in rows}
 
     base = load_map(base_version)
     new = load_map(new_version)
 
     # Avoid duplicates for the same pair
-    cur.execute(
-        "DELETE FROM summary_diff WHERE base_version=? AND new_version=?",
-        (base_version, new_version)
-    )
+    cur.execute("DELETE FROM summary_diff WHERE base_version=? AND new_version=?", (base_version, new_version))
 
     keys = set(base.keys()) | set(new.keys())
     added = removed = changed = 0
@@ -552,23 +514,29 @@ def _compute_summary_diff(conn: sqlite3.Connection,
         n = new.get(key)
         if b is None and n is not None:
             cur.execute(
-                "INSERT INTO summary_diff(base_version,new_version,host,kind,k,change,before,after,computed_at)"
-                " VALUES(?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO summary_diff(base_version,new_version,host,kind,k,change,before,after,computed_at) VALUES(?,?,?,?,?,?,?,?,?)",
                 (base_version, new_version, h, kd, k, 'added', None, n, computed_at)
             )
             added += 1
         elif b is not None and n is None:
             cur.execute(
-                "INSERT INTO summary_diff(base_version,new_version,host,kind,k,change,before,after,computed_at)"
-                " VALUES(?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO summary_diff(base_version,new_version,host,kind,k,change,before,after,computed_at) VALUES(?,?,?,?,?,?,?,?,?)",
                 (base_version, new_version, h, kd, k, 'removed', b, None, computed_at)
             )
             removed += 1
         else:
-            if (b or "") != (n or ""):
+            # both exist; structural compare
+            b_obj = _safe_json_load(b)
+            n_obj = _safe_json_load(n)
+            if type(b_obj) is not type(n_obj):
                 cur.execute(
-                    "INSERT INTO summary_diff(base_version,new_version,host,kind,k,change,before,after,computed_at)"
-                    " VALUES(?,?,?,?,?,?,?,?,?)",
+                    "INSERT INTO summary_diff(base_version,new_version,host,kind,k,change,before,after,computed_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                    (base_version, new_version, h, kd, k, 'type', b, n, computed_at)
+                )
+                changed += 1
+            elif not _equal(b_obj, n_obj):
+                cur.execute(
+                    "INSERT INTO summary_diff(base_version,new_version,host,kind,k,change,before,after,computed_at) VALUES(?,?,?,?,?,?,?,?,?)",
                     (base_version, new_version, h, kd, k, 'changed', b, n, computed_at)
                 )
                 changed += 1
@@ -582,6 +550,14 @@ def _compute_summary_diff(conn: sqlite3.Connection,
                          added=added, removed=removed, changed=changed, total=total)
     return {"added": added, "removed": removed, "changed": changed, "total": total}
 
+# ---- Parsers -----------------------------------------------------------------
+def _get_with_aliases(src: Dict[str, Any], aliases: Dict[str, List[str]], canon: str, default: Any = None) -> Any:
+    keys = aliases.get(canon, [canon])
+    for k in keys:
+        if k in src and src[k] not in (None, ""):
+            return src[k]
+    return default
+
 def parse_bgp_objects(objs: List[Dict[str, Any]], collected_at: str, strict: bool, aliases: Dict[str, Dict[str, List[str]]]) -> Tuple[List[Tuple], Dict[str, Tuple]]:
     rows: List[Tuple] = []
     summary: Dict[str, Tuple] = {}
@@ -589,19 +565,18 @@ def parse_bgp_objects(objs: List[Dict[str, Any]], collected_at: str, strict: boo
         host = _pick_host(o, "unknown")
         if strict and host == "unknown":
             continue
-        # case: object itself looks like a peer entry
-        if any(k in o for k in ("peer_ip", "peerIp", "neighbor")) and any(k in o for k in ("state", "peerState", "sessionState")):
+        # peer-like object
+        if any(k in o for k in ("peer_ip","peerIp","neighbor")) and any(k in o for k in ("state","peerState","sessionState")):
             ap = aliases.get("bgp_peer", {})
             ip = _get_with_aliases(o, ap, "peer_ip", "-")
             state = _get_with_aliases(o, ap, "state", "-")
             remote_as = _as_int(_get_with_aliases(o, ap, "remoteAs", 0))
             pfx = _as_int(_get_with_aliases(o, ap, "pfxRcd", 0))
             total = 1
-            est = 1 if state in ("Established", "OK", "established") else 0
+            est = 1 if state in ("Established","OK","established") else 0
             rows.append((host, ip, remote_as, state, 0, pfx, collected_at, "ansible-mcp"))
             summary[host] = (host, collected_at, total, est, 0, "ok", "")
             continue
-        # locate peers under a few common shapes
         peers_obj = None
         bgp = o.get("bgp") if isinstance(o.get("bgp"), dict) else None
         if bgp:
@@ -618,7 +593,6 @@ def parse_bgp_objects(objs: List[Dict[str, Any]], collected_at: str, strict: boo
         if strict and peers_obj is None:
             continue
         total = 0; est = 0
-        # iterate dict {ip: obj}
         if isinstance(peers_obj, dict):
             for ip, p in peers_obj.items():
                 ap = aliases.get("bgp_peer", {})
@@ -626,10 +600,9 @@ def parse_bgp_objects(objs: List[Dict[str, Any]], collected_at: str, strict: boo
                 remote_as = _as_int(_get_with_aliases(p, ap, "remoteAs", 0))
                 pfx = _as_int(_get_with_aliases(p, ap, "pfxRcd", 0))
                 total += 1
-                if state in ("Established", "OK", "established"):
+                if state in ("Established","OK","established"):
                     est += 1
                 rows.append((host, ip, remote_as, state, 0, pfx, collected_at, "ansible-mcp"))
-        # iterate list [{peerIp:..., ...}]
         elif isinstance(peers_obj, list):
             for p in peers_obj:
                 if not isinstance(p, dict):
@@ -640,7 +613,7 @@ def parse_bgp_objects(objs: List[Dict[str, Any]], collected_at: str, strict: boo
                 remote_as = _as_int(_get_with_aliases(p, ap, "remoteAs", 0))
                 pfx = _as_int(_get_with_aliases(p, ap, "pfxRcd", 0))
                 total += 1
-                if state in ("Established", "OK", "established"):
+                if state in ("Established","OK","established"):
                     est += 1
                 rows.append((host, ip, remote_as, state, 0, pfx, collected_at, "ansible-mcp"))
         summary[host] = (host, collected_at, total, est, 0, "ok", "")
@@ -654,8 +627,7 @@ def parse_ospf_objects(objs: List[Dict[str, Any]], collected_at: str, strict: bo
         host = _pick_host(o, "unknown")
         if strict and host == "unknown":
             continue
-        # case: object itself looks like an OSPF neighbor entry
-        if any(k in o for k in ("neighbor_id", "routerId", "id")) and any(k in o for k in ("state", "adjState")):
+        if any(k in o for k in ("neighbor_id","routerId","id")) and any(k in o for k in ("state","adjState")):
             ao = aliases.get("ospf_neighbor", {})
             rows.append((host,
                          _get_with_aliases(o, ao, "neighbor_id", "-"),
@@ -696,17 +668,17 @@ def parse_ospf_objects(objs: List[Dict[str, Any]], collected_at: str, strict: bo
 def _load_aliases(path: str) -> Dict[str, Dict[str, List[str]]]:
     m: Dict[str, Dict[str, List[str]]] = {
         "bgp_peer": {
-            "peer_ip": ["peer_ip", "peerIp", "neighbor", "id"],
-            "state": ["state", "peerState", "sessionState"],
-            "remoteAs": ["remoteAs", "asn", "remote_as"],
-            "pfxRcd": ["pfxRcd", "prefixes_received", "prefixReceived"],
+            "peer_ip": ["peer_ip","peerIp","neighbor","id"],
+            "state": ["state","peerState","sessionState"],
+            "remoteAs": ["remoteAs","asn","remote_as"],
+            "pfxRcd": ["pfxRcd","prefixes_received","prefixReceived"],
         },
         "ospf_neighbor": {
-            "neighbor_id": ["neighbor_id", "id", "routerId"],
-            "iface": ["iface", "interface", "ifname"],
-            "state": ["state", "adjState"],
-            "dead_time_raw": ["dead_time_raw", "deadTime"],
-            "address": ["address", "neighborAddress"],
+            "neighbor_id": ["neighbor_id","id","routerId"],
+            "iface": ["iface","interface","ifname"],
+            "state": ["state","adjState"],
+            "dead_time_raw": ["dead_time_raw","deadTime"],
+            "address": ["address","neighborAddress"],
         },
     }
     try:
@@ -717,70 +689,81 @@ def _load_aliases(path: str) -> Dict[str, Dict[str, List[str]]]:
             with open(path, "r", encoding="utf-8") as f:
                 y = yaml.safe_load(f)
             if isinstance(y, dict):
-                for sect in ("bgp_peer", "ospf_neighbor"):
+                for sect in ("bgp_peer","ospf_neighbor"):
                     if isinstance(y.get(sect), dict):
-                        for k, v in y[sect].items():
+                        for k,v in y[sect].items():
                             if isinstance(v, list):
                                 m.setdefault(sect, {})[k] = v
             return m
         except Exception:
             pass
-        import json as _json
         with open(path, "r", encoding="utf-8") as f:
-            y = _json.load(f)
+            y = json.load(f)
         if isinstance(y, dict):
-            for sect in ("bgp_peer", "ospf_neighbor"):
+            for sect in ("bgp_peer","ospf_neighbor"):
                 if isinstance(y.get(sect), dict):
-                    for k, v in y[sect].items():
+                    for k,v in y[sect].items():
                         if isinstance(v, list):
                             m.setdefault(sect, {})[k] = v
     except Exception:
         pass
     return m
 
-
+# ---- Preflight ---------------------------------------------------------------
+def _check_mcp_health(args, logger: LogHelper) -> bool:
+    bases: List[str] = []
+    if isinstance(args.mcp_base, str) and args.mcp_base:
+        bases.append(args.mcp_base.rstrip("/"))
+    for b in _candidate_bases(args.port):
+        if b not in bases:
+            bases.append(b)
+    ok_any = False; errors: List[str] = []
+    for b in bases:
+        ok, note = _http_get(b + "/health", timeout=5)
+        if ok:
+            logger.log_event("info", "mcp.health", "preflight", "mcp_health", "MCP health OK", base=b)
+            ok_any = True; break
+        else:
+            errors.append(f"{b}: {note}")
+    if not ok_any:
+        logger.log_event("error", "mcp.health.fail", "preflight", "mcp_health", "MCP health check failed", details=" | ".join(errors))
+    return ok_any
 
 def _preflight(args, logger: LogHelper) -> int:
-    """Return 0 if OK, otherwise non-zero exit code."""
-    # DB path writable check
     try:
         dbp = Path(args.db)
         dbdir = (dbp.parent if dbp.parent else Path("."))
         if not dbdir.exists():
-            logger.log_event("error", "db.dir.missing", "preflight", "db_path", "DB directory does not exist", path=str(dbdir))
+            logger.log_event("error","db.dir.missing","preflight","db_path","DB directory does not exist", path=str(dbdir))
             return EXIT_PREFLIGHT_FAIL
         if not os.access(dbdir, os.W_OK):
-            logger.log_event("error", "db.dir.notwritable", "preflight", "db_path", "DB directory not writable", path=str(dbdir))
+            logger.log_event("error","db.dir.notwritable","preflight","db_path","DB directory not writable", path=str(dbdir))
             return EXIT_PREFLIGHT_FAIL
     except Exception as e:
-        logger.log_event("error", "db.dir.checkfail", "preflight", "db_path", "DB path check failed", error=str(e))
+        logger.log_event("error","db.dir.checkfail","preflight","db_path","DB path check failed", error=str(e))
         return EXIT_PREFLIGHT_FAIL
 
-    # SCHEMA SQL (optional but recommended)
     if getattr(args, "schema_sql", None):
         ss = args.schema_sql
         if not os.path.exists(ss):
-            logger.log_event("error", "schema_sql.missing", "preflight", "schema", "schema_sql file not found", path=ss)
+            logger.log_event("error","schema_sql.missing","preflight","schema","schema_sql file not found", path=ss)
             return EXIT_PREFLIGHT_FAIL
         if not os.access(ss, os.R_OK):
-            logger.log_event("error", "schema_sql.notreadable", "preflight", "schema", "schema_sql not readable", path=ss)
+            logger.log_event("error","schema_sql.notreadable","preflight","schema","schema_sql not readable", path=ss)
             return EXIT_PREFLIGHT_FAIL
-        logger.log_event("info", "schema_sql.found", "preflight", "schema", "schema_sql found", path=ss)
+        logger.log_event("info","schema_sql.found","preflight","schema","schema_sql found", path=ss)
 
-    # MCP health (must be reachable to proceed)
     if not _check_mcp_health(args, logger):
         return EXIT_PREFLIGHT_FAIL
 
-    # Alias file existence is optional; warn if specified and missing
     if args.alias_file and args.alias_file not in ("key_aliases.yml",):
         if not os.path.exists(args.alias_file):
-            logger.log_event("warn", "alias_file.missing", "preflight", "alias", "alias file not found; using built-ins", alias_file=args.alias_file)
-    # Token is optional; warn only
+            logger.log_event("warn","alias_file.missing","preflight","alias","alias file not found; using built-ins", alias_file=args.alias_file)
     if not args.token:
-        logger.log_event("warn", "token.empty", "preflight", "token", "MCP token is empty; proceeding without Authorization header")
+        logger.log_event("warn","token.empty","preflight","token","MCP token is empty; proceeding without Authorization header")
     return EXIT_OK
 
-
+# ---- Main --------------------------------------------------------------------
 def main(argv: List[str]) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--db", required=True, help="SQLite DB path")
@@ -791,7 +774,7 @@ def main(argv: List[str]) -> int:
     ap.add_argument("--port", type=int, default=int(os.getenv("AIOPS_MCP_PORT","9000")))
     ap.add_argument("--verbose", action="store_true")
     ap.add_argument("--strict", action="store_true", help="Enable strict schema checks; skip objects that don't match")
-    ap.add_argument("--alias-file", default=os.getenv("MCP_ALIAS_FILE", "key_aliases.yml"), help="Optional alias file (YAML/JSON) for key normalization")
+    ap.add_argument("--alias-file", default=os.getenv("MCP_ALIAS_FILE","key_aliases.yml"), help="Optional alias file (YAML/JSON) for key normalization")
     ap.add_argument("--dry-run", action="store_true", help="Do everything except DB writes")
     ap.add_argument("--json-log", action="store_true", help="Emit logs as JSON Lines")
     ap.add_argument("--ensure-schema", action="store_true", help="(Optional) Ensure schema before insert (no-op here; use external etl.sh)")
@@ -804,39 +787,48 @@ def main(argv: List[str]) -> int:
     ap.add_argument("--new", dest="new_version", help="New version (ISO timestamp)")
     ap.add_argument("--verify", action="store_true", help="Verify ETL consistency for a specific version (or latest)")
     ap.add_argument("--version", help="Version (ISO timestamp) to verify; if omitted, use the latest in raw_state/normalized_state")
+    ap.add_argument("--prune", action="store_true", help="Prune old ETL snapshots (raw_state/normalized_state/summary_diff/schema_meta)")
+    ap.add_argument("--keep", type=int, default=5, help="Number of most-recent versions to keep when --prune is used (default: 5)")
+    ap.add_argument("--diff-host", help="Only compute diff for this host (optional)")
+    ap.add_argument("--diff-kind", help="Only compute diff for this kind (e.g., bgp_peer, ospf_neighbor)")
+    ap.add_argument("--set-unordered", action="store_true", help="When comparing JSON arrays, treat them as unordered sets")
     args = ap.parse_args(argv)
 
     _t0 = time.time()
-
     correlation_id = uuid.uuid4().hex
     logger = LogHelper(args.json_log, correlation_id)
 
     ALIASES = _load_aliases(args.alias_file)
 
     collected_at = _iso_now()
-    version_id = collected_at  # use ISO timestamp as version identifier
+    version_id = collected_at
 
     rc = _preflight(args, logger)
     if rc != EXIT_OK:
         _write_report_if_requested(args, correlation_id, rc, event="preflight.fail")
         return rc
-    logger.log_event("info", "preflight.ok", "preflight", "done", "Preflight checks passed", elapsed_ms=int((time.time()-_t0)*1000))
+    logger.log_event("info","preflight.ok","preflight","done","Preflight checks passed", elapsed_ms=int((time.time()-_t0)*1000))
 
     # --- Diff-only mode -------------------------------------------------------
     if args.diff:
         if not args.base or not args.new_version:
-            logger.log_event("error", "diff.args.missing", "diff", "args", "--diff requires --base and --new")
+            logger.log_event("error","diff.args.missing","diff","args","--diff requires --base and --new")
             _write_report_if_requested(args, correlation_id, EXIT_PREFLIGHT_FAIL, event="diff.args.missing")
             return EXIT_PREFLIGHT_FAIL
         try:
             conn = sqlite3.connect(args.db)
-            counts = _compute_summary_diff(conn, args.base, args.new_version, _iso_now(), logger)
+            counts = _compute_summary_diff(
+                conn, args.base, args.new_version, _iso_now(), logger,
+                host_filter=getattr(args, 'diff_host', None),
+                kind_filter=getattr(args, 'diff_kind', None),
+                set_unordered=bool(getattr(args, 'set_unordered', False)),
+            )
             conn.close()
             _write_report_if_requested(args, correlation_id, EXIT_OK, event="diff.done", **counts,
                                        base=args.base, new=args.new_version)
             return EXIT_OK
         except Exception as e:
-            logger.log_event("error", "diff.error", "diff", "compute", f"{e}")
+            logger.log_event("error","diff.error","diff","compute", f"{e}")
             _write_report_if_requested(args, correlation_id, EXIT_MCP_FAIL, event="diff.error", error=str(e))
             return EXIT_MCP_FAIL
 
@@ -853,7 +845,7 @@ def main(argv: List[str]) -> int:
 
             target_ver = args.version or latest_version(conn)
             if not target_ver:
-                logger.log_event("error", "verify.no_version", "verify", "args", "No version to verify")
+                logger.log_event("error","verify.no_version","verify","args","No version to verify")
                 _write_report_if_requested(args, correlation_id, EXIT_PREFLIGHT_FAIL, event="verify.no_version")
                 conn.close()
                 return EXIT_PREFLIGHT_FAIL
@@ -861,10 +853,10 @@ def main(argv: List[str]) -> int:
             def exists(table: str) -> bool:
                 return _table_exists(conn, table)
 
-            required = ["raw_state", "normalized_state"]
+            required = ["raw_state","normalized_state"]
             missing = [t for t in required if not exists(t)]
             if missing:
-                logger.log_event("error", "verify.tables.missing", "verify", "pre", f"Missing tables: {missing}")
+                logger.log_event("error","verify.tables.missing","verify","pre", f"Missing tables: {missing}")
                 _write_report_if_requested(args, correlation_id, EXIT_PREFLIGHT_FAIL, event="verify.tables.missing", missing=",".join(missing))
                 conn.close()
                 return EXIT_PREFLIGHT_FAIL
@@ -874,7 +866,6 @@ def main(argv: List[str]) -> int:
             raw_ospf = cur.execute("SELECT COUNT(*) FROM raw_state WHERE version=? AND kind='ospf'", (target_ver,)).fetchone()[0]
             norm_bgp = cur.execute("SELECT COUNT(*) FROM normalized_state WHERE version=? AND kind='bgp_peer'", (target_ver,)).fetchone()[0]
             norm_ospf = cur.execute("SELECT COUNT(*) FROM normalized_state WHERE version=? AND kind='ospf_neighbor'", (target_ver,)).fetchone()[0]
-
             bad_keys = cur.execute("SELECT COUNT(*) FROM normalized_state WHERE version=? AND (k IS NULL OR k='')", (target_ver,)).fetchone()[0]
 
             unknown_hosts = None
@@ -882,167 +873,160 @@ def main(argv: List[str]) -> int:
                 unknown_hosts = cur.execute("SELECT COUNT(*) FROM routing_summary WHERE host='unknown'").fetchone()[0]
 
             passed = (raw_bgp + raw_ospf) >= 1 and (norm_bgp + norm_ospf) >= 1 and bad_keys == 0
-            details = {
-                "version": target_ver,
-                "raw_bgp": raw_bgp,
-                "raw_ospf": raw_ospf,
-                "norm_bgp": norm_bgp,
-                "norm_ospf": norm_ospf,
-                "bad_keys": bad_keys,
-            }
+            details = {"version": target_ver, "raw_bgp": raw_bgp, "raw_ospf": raw_ospf,
+                       "norm_bgp": norm_bgp, "norm_ospf": norm_ospf, "bad_keys": bad_keys}
             if unknown_hosts is not None:
                 details["unknown_hosts"] = unknown_hosts
                 passed = passed and unknown_hosts == 0
 
             conn.close()
             if passed:
-                logger.log_event("info", "verify.ok", "verify", "check", "ETL consistency OK", **details)
+                logger.log_event("info","verify.ok","verify","check","ETL consistency OK", **details)
                 _write_report_if_requested(args, correlation_id, EXIT_OK, event="verify.ok", **details)
                 return EXIT_OK
             else:
-                logger.log_event("error", "verify.fail", "verify", "check", "ETL consistency failed", **details)
+                logger.log_event("error","verify.fail","verify","check","ETL consistency failed", **details)
                 _write_report_if_requested(args, correlation_id, EXIT_PREFLIGHT_FAIL, event="verify.fail", **details)
                 return EXIT_PREFLIGHT_FAIL
         except Exception as e:
-            logger.log_event("error", "verify.error", "verify", "check", f"{e}")
+            logger.log_event("error","verify.error","verify","check", f"{e}")
             _write_report_if_requested(args, correlation_id, EXIT_MCP_FAIL, event="verify.error", error=str(e))
             return EXIT_MCP_FAIL
 
-    if args.ensure_schema:
-        if not args.schema_sql:
-            logger.log_event("error", "schema.apply.nofile", "schema", "apply", "--ensure-schema set but --schema-sql not provided")
-            _write_report_if_requested(args, correlation_id, EXIT_SCHEMA_MISSING, event="schema.apply.fail")
-            return EXIT_SCHEMA_MISSING
-        logger.log_event("info", "schema.apply.start", "schema", "apply", "Applying schema", file=args.schema_sql)
-        _t_schema = time.time()
+    # --- Prune-only mode ------------------------------------------------------
+    if args.prune:
         try:
-            # Use sqlite3 CLI for strict reproducibility of DDL
-            proc = subprocess.run([
-                "sqlite3", args.db, f".read {args.schema_sql}"
-            ], capture_output=True, text=True, check=False)
-            if proc.returncode != 0:
-                logger.log_event("error", "schema.apply.fail", "schema", "apply", "Schema apply failed", rc=proc.returncode, stderr=proc.stderr[:400])
-                _write_report_if_requested(args, correlation_id, EXIT_SCHEMA_MISSING, event="schema.apply.fail")
-                return EXIT_SCHEMA_MISSING
-            logger.log_event("info", "schema.apply.ok", "schema", "apply", "Schema applied", elapsed_ms=int((time.time()-_t_schema)*1000))
-        except FileNotFoundError:
-            logger.log_event("error", "schema.apply.no_sqlite3", "schema", "apply", "sqlite3 CLI not found in PATH")
-            _write_report_if_requested(args, correlation_id, EXIT_SCHEMA_MISSING, event="schema.apply.fail")
-            return EXIT_SCHEMA_MISSING
+            conn = sqlite3.connect(args.db)
+            cur = conn.cursor()
+
+            def have(table: str) -> bool:
+                return _table_exists(conn, table)
+
+            versions = set()
+            if have('normalized_state'):
+                versions.update(v for (v,) in cur.execute("SELECT DISTINCT version FROM normalized_state").fetchall())
+            if have('raw_state'):
+                versions.update(v for (v,) in cur.execute("SELECT DISTINCT version FROM raw_state").fetchall())
+            versions = sorted(versions)
+            if not versions:
+                logger.log_event("info","prune.empty","prune","scan","No versions present; nothing to prune")
+                _write_report_if_requested(args, correlation_id, EXIT_OK, event="prune.empty")
+                conn.close()
+                return EXIT_OK
+
+            keep_n = max(0, int(args.keep))
+            keep_set = set(versions[-keep_n:]) if keep_n > 0 else set()
+            del_list = [v for v in versions if v not in keep_set]
+
+            if not del_list:
+                logger.log_event("info","prune.nodel","prune","plan","Nothing to prune; already within keep window", keep=keep_n)
+                _write_report_if_requested(args, correlation_id, EXIT_OK, event="prune.nodel", keep=keep_n)
+                conn.close()
+                return EXIT_OK
+
+            if getattr(args, 'dry_run', False):
+                logger.log_event("info","prune.plan","prune","dry_run","Dry-run: would delete versions",
+                                 delete_count=len(del_list), keep=keep_n, versions=",".join(del_list))
+                _write_report_if_requested(args, correlation_id, EXIT_OK, event="prune.plan", delete_count=len(del_list), keep=keep_n)
+                conn.close()
+                return EXIT_OK
+
+            deleted = {"summary_diff": 0, "normalized_state": 0, "raw_state": 0, "schema_meta": 0}
+
+            if have('summary_diff') and del_list:
+                q = "DELETE FROM summary_diff WHERE base_version IN ({}) OR new_version IN ({})".format(
+                    ",".join(["?"]*len(del_list)), ",".join(["?"]*len(del_list))
+                )
+                cur.execute(q, tuple(del_list+del_list))
+                deleted["summary_diff"] = cur.rowcount if cur.rowcount is not None else 0
+
+            if have('normalized_state') and del_list:
+                q = "DELETE FROM normalized_state WHERE version IN ({})".format(",".join(["?"]*len(del_list)))
+                cur.execute(q, tuple(del_list))
+                deleted["normalized_state"] = cur.rowcount if cur.rowcount is not None else 0
+
+            if have('raw_state') and del_list:
+                q = "DELETE FROM raw_state WHERE version IN ({})".format(",".join(["?"]*len(del_list)))
+                cur.execute(q, tuple(del_list))
+                deleted["raw_state"] = cur.rowcount if cur.rowcount is not None else 0
+
+            if have('schema_meta') and del_list:
+                q = "DELETE FROM schema_meta WHERE version IN ({})".format(",".join(["?"]*len(del_list)))
+                cur.execute(q, tuple(del_list))
+                deleted["schema_meta"] = cur.rowcount if cur.rowcount is not None else 0
+
+            conn.commit()
+            _ensure_schema_meta_view(conn)
+            logger.log_event("info","prune.ok","prune","delete","Prune completed", keep=keep_n, **deleted)
+            _write_report_if_requested(args, correlation_id, EXIT_OK, event="prune.ok", keep=keep_n, **deleted)
+            conn.close()
+            return EXIT_OK
         except Exception as e:
-            logger.log_event("error", "schema.apply.exception", "schema", "apply", "Schema apply exception", error=str(e))
-            _write_report_if_requested(args, correlation_id, EXIT_SCHEMA_MISSING, event="schema.apply.fail")
-            return EXIT_SCHEMA_MISSING
+            logger.log_event("error","prune.error","prune","delete", f"{e}")
+            _write_report_if_requested(args, correlation_id, EXIT_MCP_FAIL, event="prune.error", error=str(e))
+            return EXIT_MCP_FAIL
 
-    # Call MCP
-    res_bgp = _call_playbook(args.playbook_bgp, args.token, args.port, verbose=args.verbose) or {}
-    res_ospf = _call_playbook(args.playbook_ospf, args.token, args.port, verbose=args.verbose) or {}
-    logger.log_event("info", "mcp.call.ok", "ingest", "fetch", "MCP call complete", bgp=bool(res_bgp), ospf=bool(res_ospf))
+    # --- Ingest path ----------------------------------------------------------
+    try:
+        # Optionally ensure schema via external .read (documented; here we only log path)
+        if args.ensure_schema and args.schema_sql and os.path.exists(args.schema_sql):
+            # Do not execute .read here to avoid hidden migrations; leave to external wrapper.
+            logger.log_event("info","ensure_schema.nop","schema","noop","ensure-schema is delegated to external script", schema=args.schema_sql)
 
-    # Extract JSON objects
-    objs_bgp = _extract_result_objects(res_bgp, verbose=args.verbose)
-    objs_ospf = _extract_result_objects(res_ospf, verbose=args.verbose)
+        # Pull from MCP
+        res_bgp = _call_playbook(args.playbook_bgp, args.token, args.port, verbose=args.verbose)
+        res_ospf = _call_playbook(args.playbook_ospf, args.token, args.port, verbose=args.verbose)
+        if res_bgp is None and res_ospf is None:
+            logger.log_event("error","mcp.empty","mcp","call","Both playbooks failed or empty")
+            _write_report_if_requested(args, correlation_id, EXIT_MCP_FAIL, event="mcp.empty")
+            return EXIT_MCP_FAIL
 
-    _t_parse = time.time()
-    logger.log_event("info", "parsed.objects", "ingest", "parse", "Parsed objects", bgp=len(objs_bgp), ospf=len(objs_ospf), elapsed_ms=int((time.time()-_t_parse)*1000))
-    if not objs_bgp and not objs_ospf:
-        logger.log_event("error", "parse.nojson", "ingest", "parse", "no JSON objects extracted")
-        _write_report_if_requested(args, correlation_id, EXIT_NO_JSON, event="no_json")
-        return EXIT_NO_JSON
+        objs_bgp = _extract_result_objects(res_bgp or {}, verbose=args.verbose)
+        objs_ospf = _extract_result_objects(res_ospf or {}, verbose=args.verbose)
 
-    # debug dump of first parsed objects (when --verbose)
-    if args.verbose and objs_bgp:
-        try:
-            import sys as _sys, json as _json
-            _sys.stderr.write("[debug] sample_bgp: " + _json.dumps(objs_bgp[0], ensure_ascii=False)[:800] + "\n")
-        except Exception:
-            pass
-        print("[debug] sample_bgp (stdout mirror)", objs_bgp[0])
-    if args.verbose and objs_ospf:
-        try:
-            import sys as _sys, json as _json
-            _sys.stderr.write("[debug] sample_ospf: " + _json.dumps(objs_ospf[0], ensure_ascii=False)[:800] + "\n")
-        except Exception:
-            pass
-        print("[debug] sample_ospf (stdout mirror)", objs_ospf[0])
-    # richer debug: summarize object shapes and dump raw stdout
-    if args.verbose:
-        def _shape_summary(arr, name):
-            types = {}
-            for x in arr:
-                t = type(x).__name__
-                types[t] = types.get(t, 0) + 1
-            print(f"[debug] {name}: count={len(arr)} types={types}")
-            if arr and isinstance(arr[0], dict):
-                print(f"[debug] {name}: top_keys={sorted(list(arr[0].keys()))[:20]}")
-        _shape_summary(objs_bgp, "objs_bgp")
-        _shape_summary(objs_ospf, "objs_ospf")
-        # also dump first 400 chars of raw stdout if present
-        for tag, res in (("bgp", res_bgp), ("ospf", res_ospf)):
-            out = None
-            if isinstance(res.get("ansible"), dict):
-                out = res["ansible"].get("stdout")
-            if isinstance(out, str) and out:
-                print(f"[debug] raw_stdout_{tag}: " + out[:400].replace("\n","\\n"))
+        collected_at = _iso_now()
+        version_id = collected_at
 
-    host_hint = _guess_host_from_result(res_bgp) or _guess_host_from_result(res_ospf)
+        aliases = _load_aliases(args.alias_file)
+        bgp_rows, bgp_summary = parse_bgp_objects(objs_bgp, collected_at, args.strict, aliases)
+        ospf_rows, ospf_summary = parse_ospf_objects(objs_ospf, collected_at, args.strict, aliases)
 
-    # Parse
-    bgp_rows, bgp_sum = parse_bgp_objects(objs_bgp, collected_at, args.strict, ALIASES)
-    ospf_rows, ospf_sum = parse_ospf_objects(objs_ospf, collected_at, args.strict, ALIASES)
+        # Merge summaries
+        summaries: Dict[str, Tuple] = {}
+        for h, t in bgp_summary.items():
+            summaries[h] = t
+        for h, t in ospf_summary.items():
+            if h in summaries:
+                # merge peers/established/ospf counts
+                old = summaries[h]
+                summaries[h] = (h, collected_at,
+                                old[2] + t[2],     # peers_total
+                                old[3] + t[3],     # peers_established
+                                max(old[4], t[4]), # ospf_neighbors
+                                "ok", "")
+            else:
+                summaries[h] = t
 
-    if host_hint:
-        # fix rows
-        bgp_rows = [((host_hint if r[0] == "unknown" else r[0]),) + r[1:] for r in bgp_rows]
-        ospf_rows = [((host_hint if r[0] == "unknown" else r[0]),) + r[1:] for r in ospf_rows]
-        # fix summaries
-        def _fix_sum(d: Dict[str, Tuple]) -> Dict[str, Tuple]:
-            out: Dict[str, Tuple] = {}
-            for h, t in d.items():
-                if h == "unknown":
-                    out[host_hint] = (host_hint,) + t[1:]
-                else:
-                    out[h] = t
-            return out
-        bgp_sum = _fix_sum(bgp_sum)
-        ospf_sum = _fix_sum(ospf_sum)
+        write_sqlite(args.db, bgp_rows, ospf_rows, summaries, verbose=args.verbose, dry_run=args.dry_run, logger=logger)
 
-    # Optional Phase 2.1 snapshot & schema_meta
-    if args.snapshot or args.schema_meta:
-        try:
-            conn2 = sqlite3.connect(args.db)
-            if args.snapshot:
-                _snapshot_raw_and_normalized(conn2, version_id, objs_bgp, objs_ospf, bgp_rows, ospf_rows, collected_at, logger)
-            if args.schema_meta:
-                _insert_schema_meta(conn2, version_id, args.schema_sql, applied_by="mcp_ingest_state.py", logger=logger)
-            conn2.close()
-        except Exception as e:
-            logger.log_event("warn", "snapshot.error", "snapshot", "write", f"Snapshot/meta failed: {e}")
+        if not args.dry_run and args.snapshot:
+            conn = sqlite3.connect(args.db)
+            _snapshot_raw_and_normalized(conn, version_id, objs_bgp, objs_ospf, bgp_rows, ospf_rows, collected_at, logger)
+            if args.schema_meta and args.schema_sql:
+                _insert_schema_meta(conn, version_id, args.schema_sql, applied_by="mcp_ingest_state", logger=logger)
+            conn.close()
 
-    # Merge summaries (host union)
-    summaries = dict(bgp_sum)
-    for h, tup in ospf_sum.items():
-        if h in summaries:
-            # (host, ts, peer_cnt, est, ospf, status, err)
-            old = list(summaries[h])
-            old[4] = tup[4]  # ospf_neighbors
-            summaries[h] = tuple(old)
-        else:
-            summaries[h] = tup
+        logger.log_event("info","done","main","exit","Ingest completed",
+                         bgp_rows=len(bgp_rows), ospf_rows=len(ospf_rows), hosts=len(summaries))
+        _write_report_if_requested(args, correlation_id, EXIT_OK, event="ingest.ok",
+                                   bgp_rows=len(bgp_rows), ospf_rows=len(ospf_rows), hosts=len(summaries))
+        return EXIT_OK
 
-    # Write
-    _t_write = time.time()
-    write_sqlite(args.db, bgp_rows, ospf_rows, summaries, verbose=args.verbose, dry_run=args.dry_run, logger=logger)
-    logger.log_event("info", "db.write", "ingest", "write", "DB write", bgp_rows=len(bgp_rows), ospf_rows=len(ospf_rows), hosts=len(summaries), elapsed_ms=int((time.time()-_t_write)*1000))
+    except Exception as e:
+        logger.log_event("error","ingest.error","main","run", f"{e}")
+        _write_report_if_requested(args, correlation_id, EXIT_MCP_FAIL, event="ingest.error", error=str(e))
+        return EXIT_MCP_FAIL
 
-    if args.dry_run:
-        logger.log_event("info", "db.dryrun", "db", "commit", "[dry-run] skipped commit")
-    if args.verbose:
-        print(f"[done] wrote bgp_rows={len(bgp_rows)} ospf_rows={len(ospf_rows)} summaries={len(summaries)} strict={args.strict}")
-    logger.log_event("info", "ingest.done", "ingest", "done", "Ingest done", bgp_rows=len(bgp_rows), ospf_rows=len(ospf_rows), hosts=len(summaries), strict=args.strict, dry_run=args.dry_run)
-
-    _write_report_if_requested(args, correlation_id, EXIT_OK, event="ingest.done", bgp_rows=len(bgp_rows), ospf_rows=len(ospf_rows), hosts=len(summaries))
-    return 0
 
 if __name__ == "__main__":
-    raise SystemExit(main(sys.argv[1:]))
+    sys.exit(main(sys.argv[1:]))

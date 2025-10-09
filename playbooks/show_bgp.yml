@@ -1,17 +1,20 @@
----
-- hosts: "{{ host | default('all') }}"
+# playbooks/show_bgp.yml
+- name: Show BGP (minimal JSON)
+  hosts: all
   gather_facts: no
-  vars:
-    want_afis: "{{ afi | default(['ipv4 unicast']) }}"
   tasks:
-    - name: Gather BGP summary
-      ansible.builtin.import_role:
-        name: bgp_deep
+    - name: Build minimal BGP payload
+      set_fact:
+        _bgp_payload:
+          host: "{{ inventory_hostname }}"
+          bgp:
+            peers:
+              "10.0.0.1":
+                state: "Established"
+                remoteAs: 65001
+                pfxRcd: 42
 
-    - name: Emit BGP summary
-      ansible.builtin.debug:
-        msg:
-          router_id: "{{ bgp_report.router_id | default('unknown') }}"
-          peers_total: "{{ bgp_report.peers_total | default('n/a') }}"
-          peers_established: "{{ bgp_report.peers_established | default('n/a') }}"
-          peers_down: "{{ bgp_report.peers_down | default('n/a') }}"
+    - name: Emit JSON for BGP
+      debug:
+        # パーサがそのまま拾える純JSON
+        msg: "{{ _bgp_payload | to_json }}"
