@@ -76,6 +76,24 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--verbose", action="store_true")
     args = ap.parse_args(argv)
 
+    # --- MCPペイロード受信（標準入力 or ファイル経由） ---
+    mcp_payload = None
+    if not sys.stdin.isatty():
+        try:
+            mcp_payload = json.load(sys.stdin)
+        except Exception:
+            mcp_payload = None
+    elif os.getenv("MCP_PAYLOAD_FILE") and Path(os.getenv("MCP_PAYLOAD_FILE")).exists():
+        try:
+            mcp_payload = json.loads(Path(os.getenv("MCP_PAYLOAD_FILE")).read_text(encoding="utf-8"))
+        except Exception:
+            mcp_payload = None
+    if mcp_payload:
+        targets = mcp_payload.get("arguments", {}).get("targets", [])
+        states = mcp_payload.get("arguments", {}).get("states", [])
+        # ここでtargets・statesをDB更新や後続処理に活用する
+        print(json.dumps({"ts": iso_now(), "event": "mcp_payload.received", "targets_count": len(targets), "states_count": len(states)}))
+        # 必要に応じてDBへ反映する処理を追加
     apply_schema(args.db, args.schema_sql, args.verbose)
     rc1 = run_ingest(args.wrapper_dir, args.db, args.token, args.mcp_base, args.alias_file, args.json_log, args.verbose)
     rc2 = run_verify(args.wrapper_dir, args.db, args.json_log, args.verbose)
