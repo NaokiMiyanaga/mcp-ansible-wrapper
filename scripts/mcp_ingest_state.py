@@ -1016,6 +1016,27 @@ def main(argv: List[str]) -> int:
                 _insert_schema_meta(conn, version_id, args.schema_sql, applied_by="mcp_ingest_state", logger=logger)
             conn.close()
 
+        # DIFFサマリ集計
+        diff_summary = None
+        try:
+            conn = sqlite3.connect(args.db)
+            cur = conn.cursor()
+            res = cur.execute("SELECT change, COUNT(*) FROM summary_diff WHERE new_version=? GROUP BY change", (version_id,)).fetchall()
+            diff_summary = {row[0]: row[1] for row in res}
+            conn.close()
+        except Exception as e:
+            diff_summary = {"error": str(e)}
+
+        # 標準出力でDIFFサマリをJSON返却
+        result = {
+            "status": "ok",
+            "summary": f"Ingest completed: hosts={len(summaries)}",
+            "bgp_rows": len(bgp_rows),
+            "ospf_rows": len(ospf_rows),
+            "hosts": len(summaries),
+            "diff_summary": diff_summary
+        }
+        print(json.dumps(result, ensure_ascii=False))
         logger.log_event("info","done","main","exit","Ingest completed",
                          bgp_rows=len(bgp_rows), ospf_rows=len(ospf_rows), hosts=len(summaries))
         _write_report_if_requested(args, correlation_id, EXIT_OK, event="ingest.ok",
