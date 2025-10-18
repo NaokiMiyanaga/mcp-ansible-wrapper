@@ -1,5 +1,166 @@
 ---
-- hosts: all
+- name: Router summary (FRR first, graceful fallback)
+  hosts: "{{ host | default('all') }}"
   gather_facts: no
-  vars: {}
-  tasks: []
+  vars:
+    _mgmt_address: "{{ hostvars[inventory_hostname].ansible_host | default(inventory_hostname) }}"
+    _is_router: >-
+      {{
+        ('routers' in group_names)
+        or (hostvars[inventory_hostname].device_role | default('')) in ['router','edge-router','core-router']
+        or (inventory_hostname is match('^(r|R)[0-9].*'))
+      }}
+  tasks:
+    - name: Locate vtysh binary
+      ansible.builtin.command: which vtysh
+      register: _which_vtysh
+      changed_when: false
+      failed_when: false
+      when: _is_router
+
+    - name: Gather FRR BGP summary (JSON)
+      ansible.builtin.command:
+        cmd: vtysh -c "show bgp summary json"
+      register: _bgp_summary_raw
+      changed_when: false
+      failed_when: false
+      when:
+        - _is_router
+        - _which_vtysh.rc == 0
+
+    - name: Parse FRR BGP summary
+      ansible.builtin.set_fact:
+        _router_summary_bgp: "{{ (_bgp_summary_raw.stdout | default('{}')) | from_json }}"
+      when:
+        - _is_router
+        - _which_vtysh.rc == 0
+        - (_bgp_summary_raw.stdout | default('')) | length > 0
+
+    - name: Gather FRR OSPF neighbors
+      ansible.builtin.command:
+        cmd: vtysh -c "show ip ospf neighbor json"
+      register: _ospf_neighbors_raw
+      changed_when: false
+      failed_when: false
+      when:
+        - _is_router
+        - _which_vtysh.rc == 0
+
+    - name: Parse FRR OSPF neighbors
+      ansible.builtin.set_fact:
+        _router_summary_ospf: "{{ (_ospf_neighbors_raw.stdout | default('{}')) | from_json }}"
+      when:
+        - _is_router
+        - _which_vtysh.rc == 0
+        - (_ospf_neighbors_raw.stdout | default('')) | length > 0
+
+    - name: Gather interface brief (FRR)
+      ansible.builtin.command:
+        cmd: vtysh -c "show interface brief json"
+      register: _iface_brief_raw
+      changed_when: false
+      failed_when: false
+      when:
+        - _is_router
+        - _which_vtysh.rc == 0
+
+    - name: Parse interface brief
+      ansible.builtin.set_fact:
+        _router_summary_interfaces: "{{ (_iface_brief_raw.stdout | default('{}')) | from_json }}"
+      when:
+        - _is_router
+        - _which_vtysh.rc == 0
+        - (_iface_brief_raw.stdout | default('')) | length > 0
+
+    - name: Gather interface statistics via ip command
+      ansible.builtin.command:
+        cmd: ip -json -s link show
+      register: _ip_link_raw
+      changed_when: false
+      failed_when: false
+      when: _is_router
+
+    - name: Parse interface statistics via ip command
+      ansible.builtin.set_fact:
+        _router_interfaces_ip: "{{ (_ip_link_raw.stdout | default('[]')) | from_json }}"
+      when:
+        - _is_router
+        - (_ip_link_raw.stdout | default('')) | length > 0
+
+    - name: Build interface statistics structures
+      ansible.builtin.set_fact:
+        _router_interface_stats: >-
+          {{
+            (_router_interface_stats | default({})) |
+            combine({
+              (item.ifname | default('unknown')): {
+                'mtu': item.get('mtu'),
+                'operstate': item.get('operstate'),
+                'link_type': item.get('link_type'),
+                'mac': item.get('address'),
+                'addr_info': item.get('addr_info', []),
+                'statistics': (item.get('stats64') or item.get('stats') or {})
+              }
+            }, recursive=True)
+          }}
+        _router_interfaces_normalized: >-
+          {{
+            (_router_interfaces_normalized | default([])) + [
+              {
+                'name': item.ifname | default('unknown'),
+                'mtu': item.get('mtu'),
+                'operstate': item.get('operstate'),
+                'link_type': item.get('link_type'),
+                'mac': item.get('address'),
+                'addr_info': item.get('addr_info', []),
+                'statistics': (item.get('stats64') or item.get('stats') or {})
+              }
+            ]
+          }}
+      loop: "{{ _router_interfaces_ip | default([]) }}"
+      loop_control:
+        label: "{{ item.ifname | default('unknown') }}"
+      when:
+        - _is_router
+        - (_router_interfaces_ip | default([])) | length > 0
+
+    - name: Build interface counters summary text
+      ansible.builtin.set_fact:
+        _router_interface_summary_lines: >-
+          {{
+            (_router_interface_summary_lines | default([])) + [
+              (
+                (item.key | default('unknown')) ~
+                ': state=' ~ (item.value.operstate | default('unknown')) ~
+                ' rx_pkts=' ~ (item.value.statistics.rx.packets | default(item.value.statistics.rx_packets | default(0))) ~
+                ' tx_pkts=' ~ (item.value.statistics.tx.packets | default(item.value.statistics.tx_packets | default(0))) ~
+                ' rx_err=' ~ (item.value.statistics.rx.errors | default(item.value.statistics.rx_errors | default(0))) ~
+                ' tx_err=' ~ (item.value.statistics.tx.errors | default(item.value.statistics.tx_errors | default(0)))
+              )
+            ]
+          }}
+      loop: "{{ (_router_interface_stats | default({})) | dict2items }}"
+      loop_control:
+        label: "{{ item.key | default('unknown') }}"
+      when:
+        - _is_router
+        - (_router_interface_stats | default({})) | length > 0
+
+    - name: Build router summary payload
+      ansible.builtin.set_fact:
+        router_summary_payload:
+          host: "{{ inventory_hostname }}"
+          address: "{{ _mgmt_address }}"
+          platform: "{{ 'frr' if _which_vtysh.rc == 0 else 'linux' }}"
+          bgp_summary: "{{ _router_summary_bgp | default({}) }}"
+          ospf_neighbors: "{{ _router_summary_ospf | default({}) }}"
+          interfaces: "{{ _router_summary_interfaces | default(_router_interfaces_normalized | default([])) }}"
+          interfaces_ip: "{{ _router_interfaces_ip | default([]) }}"
+          interface_counters: "{{ _router_interface_stats | default({}) }}"
+          interface_counters_summary: "{{ _router_interface_summary_lines | default([]) }}"
+      when: _is_router
+
+    - name: Emit router summary JSON
+      ansible.builtin.debug:
+        msg: "{{ router_summary_payload | to_json }}"
+      when: _is_router

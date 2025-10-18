@@ -5,7 +5,7 @@ WORKDIR /app/ansible-mcp
 # RUN pip install --no-cache-dir -r /app/ansible-mcp/requirements.txt
 RUN pip install --no-cache-dir fastapi uvicorn[standard] ansible docker PyYAML jsonschema openai httpx
 
-RUN ansible-galaxy collection install community.docker -p /app/collections
+RUN ansible-galaxy collection install community.docker
 
 ENV LOG_DIR=/app/ansible-mcp/logs
 RUN mkdir -p $LOG_DIR

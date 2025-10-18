@@ -1,5 +1,101 @@
 ---
-- hosts: all
+- name: Linux bridge summary
+  hosts: "{{ host | default('all') }}"
   gather_facts: no
-  vars: {}
-  tasks: []
+  vars:
+    _is_bridge_host: >-
+      {{
+        ('switches' in group_names)
+        or (hostvars[inventory_hostname].device_role | default('')) in ['switch','l2-switch']
+        or (inventory_hostname is match('^(l|L)[0-9].*'))
+      }}
+  tasks:
+    - name: Locate bridge executable
+      ansible.builtin.command: which bridge
+      register: _which_bridge
+      changed_when: false
+      failed_when: false
+      when: _is_bridge_host
+
+    - name: Collect bridge link information
+      ansible.builtin.command: bridge -json link show
+      register: _bridge_link_raw
+      changed_when: false
+      failed_when: false
+      when:
+        - _is_bridge_host
+        - _which_bridge.rc == 0
+
+    - name: Collect bridge vlan information
+      ansible.builtin.command: bridge -json vlan show
+      register: _bridge_vlan_raw
+      changed_when: false
+      failed_when: false
+      when:
+        - _is_bridge_host
+        - _which_bridge.rc == 0
+
+    - name: Collect bridge fdb information
+      ansible.builtin.command: bridge -json fdb show
+      register: _bridge_fdb_raw
+      changed_when: false
+      failed_when: false
+      when:
+        - _is_bridge_host
+        - _which_bridge.rc == 0
+
+    - name: Collect teamd/ifstat fallback
+      ansible.builtin.command: ip -json link show type bridge
+      register: _ip_bridge_raw
+      changed_when: false
+      failed_when: false
+      when:
+        - _is_bridge_host
+        - _which_bridge.rc != 0
+
+    - name: Parse bridge links (FRR bridge tool)
+      ansible.builtin.set_fact:
+        _bridge_links: "{{ (_bridge_link_raw.stdout | default('[]')) | from_json }}"
+      when:
+        - _is_bridge_host
+        - _which_bridge.rc == 0
+        - (_bridge_link_raw.stdout | default('')) | length > 0
+
+    - name: Parse bridge VLANs
+      ansible.builtin.set_fact:
+        _bridge_vlans: "{{ (_bridge_vlan_raw.stdout | default('[]')) | from_json }}"
+      when:
+        - _is_bridge_host
+        - _which_bridge.rc == 0
+        - (_bridge_vlan_raw.stdout | default('')) | length > 0
+
+    - name: Parse bridge FDB
+      ansible.builtin.set_fact:
+        _bridge_fdb: "{{ (_bridge_fdb_raw.stdout | default('[]')) | from_json }}"
+      when:
+        - _is_bridge_host
+        - _which_bridge.rc == 0
+        - (_bridge_fdb_raw.stdout | default('')) | length > 0
+
+    - name: Parse bridge links (fallback)
+      ansible.builtin.set_fact:
+        _bridge_links: "{{ (_ip_bridge_raw.stdout | default('[]')) | from_json }}"
+      when:
+        - _is_bridge_host
+        - _which_bridge.rc != 0
+        - (_ip_bridge_raw.stdout | default('')) | length > 0
+
+    - name: Build bridge payload
+      ansible.builtin.set_fact:
+        bridge_summary_payload:
+          host: "{{ inventory_hostname }}"
+          bridge_present: "{{ _which_bridge.rc == 0 }}"
+          links: "{{ _bridge_links | default([]) }}"
+          vlans: "{{ _bridge_vlans | default([]) }}"
+          fdb: "{{ _bridge_fdb | default([]) }}"
+      when: _is_bridge_host
+
+    - name: Emit bridge summary JSON
+      ansible.builtin.debug:
+        msg: "{{ bridge_summary_payload | to_json }}"
+      when: _is_bridge_host

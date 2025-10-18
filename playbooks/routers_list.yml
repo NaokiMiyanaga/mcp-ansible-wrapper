@@ -1,5 +1,69 @@
 ---
-- hosts: all
+- name: Routers inventory list (FRR first)
+  hosts: "{{ host | default('all') }}"
   gather_facts: no
-  vars: {}
-  tasks: []
+  vars:
+    _mgmt_address: "{{ hostvars[inventory_hostname].ansible_host | default(inventory_hostname) }}"
+    _is_router: >-
+      {{
+        ('routers' in group_names)
+        or (hostvars[inventory_hostname].device_role | default('')) in ['router','edge-router','core-router']
+        or (inventory_hostname is match('^(r|R)[0-9].*'))
+      }}
+  tasks:
+    - name: Locate vtysh binary
+      ansible.builtin.command: which vtysh
+      register: _which_vtysh
+      changed_when: false
+      failed_when: false
+      when: _is_router
+
+    - name: Collect VTYSH version
+      ansible.builtin.command: vtysh -c "show version"
+      register: _vtysh_version
+      changed_when: false
+      failed_when: false
+      when:
+        - _is_router
+        - _which_vtysh.rc == 0
+
+    - name: Collect BGP summary (JSON) when available
+      ansible.builtin.command:
+        cmd: vtysh -c "show bgp summary json"
+      register: _bgp_summary_raw
+      changed_when: false
+      failed_when: false
+      when:
+        - _is_router
+        - _which_vtysh.rc == 0
+
+    - name: Parse BGP summary
+      ansible.builtin.set_fact:
+        _bgp_summary: "{{ (_bgp_summary_raw.stdout | default('{}')) | from_json }}"
+      when:
+        - _is_router
+        - _which_vtysh.rc == 0
+        - (_bgp_summary_raw.stdout | default('')) | length > 0
+
+    - name: Collect platform information (fallback)
+      ansible.builtin.command: uname -r
+      register: _uname_version
+      changed_when: false
+      failed_when: false
+      when: _is_router
+
+    - name: Build router list entry
+      ansible.builtin.set_fact:
+        router_entry:
+          host: "{{ inventory_hostname }}"
+          address: "{{ _mgmt_address }}"
+          platform: "{{ 'frr' if _which_vtysh.rc == 0 else 'linux' }}"
+          vtysh_version: "{{ (_vtysh_version.stdout | default('')).strip() if _which_vtysh.rc == 0 else omit }}"
+          kernel: "{{ (_uname_version.stdout | default('')).strip() }}"
+          bgp_summary: "{{ _bgp_summary | default({}) }}"
+      when: _is_router
+
+    - name: Emit router entry JSON
+      ansible.builtin.debug:
+        msg: "{{ router_entry | to_json }}"
+      when: _is_router

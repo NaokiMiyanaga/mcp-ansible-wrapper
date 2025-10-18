@@ -1,5 +1,31 @@
 ---
-- hosts: all
+- name: Router count summary
+  hosts: localhost
   gather_facts: no
-  vars: {}
-  tasks: []
+  vars:
+    _router_candidates: "{{ groups.get('routers', []) | list }}"
+  tasks:
+    - name: Merge routers discovered via device_role
+      ansible.builtin.set_fact:
+        _router_candidates: "{{ (_router_candidates + [item]) | unique }}"
+      loop: "{{ groups['all'] | default([]) }}"
+      when:
+        - hostvars[item] is defined
+        - hostvars[item].device_role is defined
+        - hostvars[item].device_role in ['router', 'edge-router', 'core-router']
+
+    - name: Merge routers detected by hostname pattern
+      ansible.builtin.set_fact:
+        _router_candidates: "{{ (_router_candidates + [item]) | unique }}"
+      loop: "{{ groups['all'] | default([]) }}"
+      when: item is match('^(r|R)[0-9].*')
+
+    - name: Build payload
+      ansible.builtin.set_fact:
+        router_count_payload:
+          total: "{{ _router_candidates | length }}"
+          routers: "{{ _router_candidates }}"
+
+    - name: Emit router count JSON
+      ansible.builtin.debug:
+        msg: "{{ router_count_payload | to_json }}"

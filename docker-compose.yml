@@ -16,6 +16,7 @@ services:
       MCP_LOG_DIR: /app/ansible-mcp/logs
       ANSIBLE_BIN: /usr/local/bin/ansible-playbook
       ANSIBLE_INVENTORY: /app/ansible-mcp/inventory.ini
+      ANSIBLE_CONFIG: /app/ansible-mcp/ansible.cfg
     volumes:
       - ./:/app/ansible-mcp:rw
 #      - ./knowledge:/app/knowledge:rw

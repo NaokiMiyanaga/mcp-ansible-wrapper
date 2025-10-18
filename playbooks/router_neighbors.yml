@@ -1,0 +1,77 @@
+---
+- name: Router neighbors via CLI
+  hosts: "{{ host | default('routers') }}"
+  gather_facts: no
+  vars:
+    _mgmt_address: "{{ hostvars[inventory_hostname].ansible_host | default(inventory_hostname) }}"
+    _is_router: >-
+      {{
+        ('routers' in group_names)
+        or (hostvars[inventory_hostname].device_role | default('')).lower() in ['router','edge-router','core-router']
+        or (inventory_hostname is match('^(r|R)[0-9].*'))
+      }}
+    _arp_table: []
+    _mac_table: []
+    _interfaces_ip: []
+    _neighbor_method: "cli"
+
+  tasks:
+    - name: Gather ARP table
+      ansible.builtin.command:
+        cmd: ip -json neigh show
+      register: _ip_neigh
+      changed_when: false
+      failed_when: false
+      when: _is_router
+
+    - name: Parse ARP table
+      ansible.builtin.set_fact:
+        _arp_table: "{{ (_ip_neigh.stdout | default('[]', true)) | from_json | default([]) }}"
+      when:
+        - _is_router
+        - (_ip_neigh.stdout | default('')) | length > 0
+
+    - name: Gather MAC address table (bridge fdb)
+      ansible.builtin.command:
+        cmd: bridge -json fdb show
+      register: _bridge_fdb
+      changed_when: false
+      failed_when: false
+      when: _is_router
+
+    - name: Parse MAC address table
+      ansible.builtin.set_fact:
+        _mac_table: "{{ (_bridge_fdb.stdout | default('[]', true)) | from_json | default([]) }}"
+      when:
+        - _is_router
+        - (_bridge_fdb.stdout | default('')) | length > 0
+
+    - name: Gather interface addresses
+      ansible.builtin.command:
+        cmd: ip -json addr show
+      register: _ip_addr
+      changed_when: false
+      failed_when: false
+      when: _is_router
+
+    - name: Parse interface addresses
+      ansible.builtin.set_fact:
+        _interfaces_ip: "{{ (_ip_addr.stdout | default('[]', true)) | from_json | default([]) }}"
+      when:
+        - _is_router
+        - (_ip_addr.stdout | default('')) | length > 0
+
+    - name: Build neighbor payload
+      ansible.builtin.set_fact:
+        router_neighbors_payload:
+          host: "{{ inventory_hostname }}"
+          address: "{{ _mgmt_address }}"
+          dev_os: "cli"
+          method: "{{ _neighbor_method }}"
+          arp_table: "{{ _arp_table | default([]) }}"
+          mac_address_table: "{{ _mac_table | default([]) }}"
+          interfaces_ip: "{{ _interfaces_ip | default([]) }}"
+
+    - name: Emit neighbor JSON
+      ansible.builtin.debug:
+        msg: "{{ router_neighbors_payload | to_json }}"
