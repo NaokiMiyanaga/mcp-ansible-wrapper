@@ -1,0 +1,41 @@
+---
+- name: Router MAC address table via CLI
+  hosts: "{{ host | default('routers') }}"
+  gather_facts: no
+  vars:
+    _mgmt_address: "{{ hostvars[inventory_hostname].ansible_host | default(inventory_hostname) }}"
+    _is_router: >-
+      {{
+        ('routers' in group_names)
+        or (hostvars[inventory_hostname].device_role | default('')).lower() in ['router','edge-router','core-router']
+        or (inventory_hostname is match('^(r|R)[0-9].*'))
+      }}
+    _mac_table: []
+
+  tasks:
+    - name: Gather MAC address table (bridge fdb)
+      ansible.builtin.command:
+        cmd: bridge -json fdb show
+      register: _bridge_fdb
+      changed_when: false
+      failed_when: false
+      when: _is_router
+
+    - name: Parse MAC address table
+      ansible.builtin.set_fact:
+        _mac_table: "{{ (_bridge_fdb.stdout | default('[]', true)) | from_json | default([]) }}"
+      when:
+        - _is_router
+        - (_bridge_fdb.stdout | default('')) | length > 0
+
+    - name: Emit MAC table payload
+      ansible.builtin.debug:
+        msg: >
+          {{
+            {
+              "host": inventory_hostname,
+              "address": _mgmt_address,
+              "mac_address_table": _mac_table | default([])
+            } | to_json
+          }}
+      when: _is_router
