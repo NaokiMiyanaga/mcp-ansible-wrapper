@@ -13,11 +13,3 @@
     - name: Emit OSPF deep report
       ansible.builtin.debug:
         msg: "{{ ospf_report }}"
-
-
-x_meta:
-  intent: show_ospf_deep
-  role: router
-  scope: multiple
-  target_group: routers
-  tags: [ospf, neighbor, adjacency, lsdb, routing, deep]

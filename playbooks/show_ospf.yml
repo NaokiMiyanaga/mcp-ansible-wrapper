@@ -1,20 +1,15 @@
-# playbooks/show_ospf.yml
-- name: Show OSPF (minimal JSON)
-  hosts: all
+---
+- hosts: "{{ host | default('all') }}"
   gather_facts: no
+  vars:
+    ospf_report_depth: "summary"
   tasks:
-    - name: Build minimal OSPF payload
-      set_fact:
-        _ospf_payload:
-          host: "{{ inventory_hostname }}"
-          ospf:
-            neighbors:
-              - neighbor_id: "1.1.1.1"
-                iface: "eth0"
-                state: "Full"
-                dead_time_raw: "00:38:00"
-                address: "10.0.0.1"
+    - name: Gather OSPF summary
+      ansible.builtin.import_role:
+        name: ospf_report
+      vars:
+        ospf_report_depth: "summary"
 
-    - name: Emit JSON for OSPF
-      debug:
-        msg: "{{ _ospf_payload | to_json }}"
+    - name: Emit OSPF summary
+      ansible.builtin.debug:
+        msg: "{{ ospf_report }}"
