@@ -190,6 +190,8 @@ async def tools_list(request: Request):
         {"name": "mcp.test.echo", "description": "Echo text", "input_schema": {"type": "object", "properties": {"text": {"type": "string"}}}},
         {"name": "ansible.playbooks.list", "description": "List playbooks", "input_schema": {"type": "object", "properties": {"q": {"type": "string"}, "include_fs": {"type": "boolean"}}}},
         {"name": "ansible.playbook", "description": "Run a playbook by intent or name", "input_schema": {"type": "object", "properties": {"playbook": {"type": "string"}, "default_vars": {"type": "object"}}}},
+        {"name": "ansible.playbook_catalog", "description": "Catalog of playbooks (list/info)",
+         "input_schema": {"type": "object", "properties": {"action": {"type": "string"}, "category": {"type": "string"}, "name": {"type": "string"}}, "required": ["action"]}},
         {"name": "ansible.select_playbook", "description": "Select a candidate playbook for an intent", "input_schema": {"type": "object", "properties": {"action": {"type": "string"}, "host": {"type": "string"}}}},
         {"name": "ansible.inventory", "description": "Show inventory (ansible-inventory --list)", "input_schema": {"type": "object", "properties": {}}},
         {"name": "playbook.run", "description": "Run a playbook (path, vars)", "input_schema": {"type": "object", "properties": {"path": {"type": "string"}, "vars": {"type": "object"}}}},
@@ -312,6 +314,64 @@ async def tools_call(request: Request):
             resp["request_id"] = _REQ_ID
         _mcp_log(_REQ_ID, 11, "ansible-mcp reply", {"status": 200, "summary": result["summary"], "plan": plan, "candidates": tops, "mode": "search"})
         return JSONResponse(resp, status_code=200)
+
+    # 2-ab) Playbook catalog (list/info)
+    if name == "ansible.playbook_catalog":
+        action = safe_lower(args.get("action")) if isinstance(args, dict) else ""
+        category = args.get("category") if isinstance(args, dict) else None
+        # Load index
+        index = load_playbook_index(BASE_DIR)
+        # Normalize helper
+        def norm_entry(it: Dict[str, Any]) -> Dict[str, Any]:
+            out = {
+                "playbook": it.get("playbook"),
+                "intent": it.get("intent"),
+                "description": it.get("description"),
+            }
+            # Optional fields if present in index
+            for k in ("title", "target_category", "required_capabilities", "optional_capabilities", "tags"):
+                if it.get(k) is not None:
+                    out[k] = it.get(k)
+            return out
+        # list
+        if action in ("list", "ls", "all", "*"):
+            items = []
+            for it in (index or []):
+                if category and it.get("target_category") and it.get("target_category") != category:
+                    continue
+                items.append(norm_entry(it))
+            result = {"playbooks": items, "count": len(items)}
+            resp = {"ok": True, "id": rid, "ts_jst": _now_jst(), "result": result}
+            if _REQ_ID:
+                resp["request_id"] = _REQ_ID
+            _mcp_log(_REQ_ID, 11, "ansible-mcp reply", {"status": 200, "summary": f"catalog list ({len(items)})", "category": category})
+            return JSONResponse(resp, status_code=200)
+        # info
+        if action in ("info", "show", "get"):
+            key = None
+            if isinstance(args, dict):
+                key = args.get("name") or args.get("id") or args.get("playbook")
+            key_l = safe_lower(key)
+            entry = None
+            if key_l:
+                for it in (index or []):
+                    intent_l = safe_lower(it.get("intent"))
+                    pb = it.get("playbook")
+                    stem_l = safe_lower(Path(pb).stem if isinstance(pb, str) else None)
+                    if key_l in (intent_l, stem_l) or (isinstance(pb, str) and key_l == safe_lower(pb)):
+                        entry = it
+                        break
+            if not entry:
+                details = {"received": args}
+                err = _err_payload("not_found", f"no such playbook: {key}", details=details, status=404)
+                _mcp_log(_REQ_ID, 11, "ansible-mcp reply", {"status": 404, "error": {"code": "not_found", "key": key}})
+                return err
+            result = {"playbook": norm_entry(entry)}
+            resp = {"ok": True, "id": rid, "ts_jst": _now_jst(), "result": result}
+            if _REQ_ID:
+                resp["request_id"] = _REQ_ID
+            _mcp_log(_REQ_ID, 11, "ansible-mcp reply", {"status": 200, "summary": f"catalog info {key}"})
+            return JSONResponse(resp, status_code=200)
 
     # 2-b) Playbook listing
     if name == "ansible.playbooks.list":
@@ -647,6 +707,60 @@ async def mcp(request: Request):
             resp["request_id"] = _REQ_ID
         _mcp_log(_REQ_ID, 11, "ansible-mcp reply", {"status": 200, "summary": f"playbooks list ({len(items)})", "filtered": bool(q), "include_fs": include_fs})
         return JSONResponse(resp, status_code=200)
+
+    # 2-b') Playbook catalog (list/info)
+    if tool == "ansible.playbook_catalog":
+        action = safe_lower(vars_.get("action")) if isinstance(vars_, dict) else ""
+        category = vars_.get("category") if isinstance(vars_, dict) else None
+        index = load_playbook_index(BASE_DIR)
+
+        def norm_entry(it: Dict[str, Any]) -> Dict[str, Any]:
+            out = {
+                "playbook": it.get("playbook"),
+                "intent": it.get("intent"),
+                "description": it.get("description"),
+            }
+            for k in ("title", "target_category", "required_capabilities", "optional_capabilities", "tags"):
+                if it.get(k) is not None:
+                    out[k] = it.get(k)
+            return out
+
+        if action in ("list", "ls", "all", "*"):
+            items = []
+            for it in (index or []):
+                if category and it.get("target_category") and it.get("target_category") != category:
+                    continue
+                items.append(norm_entry(it))
+            resp = {"ok": True, "playbooks": items, "count": len(items), "ts_jst": _now_jst()}
+            if _REQ_ID:
+                resp["request_id"] = _REQ_ID
+            _mcp_log(_REQ_ID, 11, "ansible-mcp reply", {"status": 200, "summary": f"catalog list ({len(items)})", "category": category})
+            return JSONResponse(resp, status_code=200)
+
+        if action in ("info", "show", "get"):
+            key = None
+            if isinstance(vars_, dict):
+                key = vars_.get("name") or vars_.get("id") or vars_.get("playbook")
+            key_l = safe_lower(key)
+            entry = None
+            if key_l:
+                for it in (index or []):
+                    intent_l = safe_lower(it.get("intent"))
+                    pb = it.get("playbook")
+                    stem_l = safe_lower(Path(pb).stem if isinstance(pb, str) else None)
+                    if key_l in (intent_l, stem_l) or (isinstance(pb, str) and key_l == safe_lower(pb)):
+                        entry = it
+                        break
+            if not entry:
+                details = {"received": vars_}
+                err = _err_payload("not_found", f"no such playbook: {key}", details=details, status=404)
+                _mcp_log(_REQ_ID, 11, "ansible-mcp reply", {"status": 404, "error": {"code": "not_found", "key": key}})
+                return err
+            resp = {"ok": True, "playbook": norm_entry(entry), "ts_jst": _now_jst()}
+            if _REQ_ID:
+                resp["request_id"] = _REQ_ID
+            _mcp_log(_REQ_ID, 11, "ansible-mcp reply", {"status": 200, "summary": f"catalog info {key}"})
+            return JSONResponse(resp, status_code=200)
 
     # 3) Inventory listing (ansible-inventory --list)
     if tool == "ansible.inventory":

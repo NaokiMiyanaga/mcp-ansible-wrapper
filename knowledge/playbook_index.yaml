@@ -27,3 +27,88 @@
   examples:
     - "network overview"
     - "bgp overview"
+
+# --- Added catalog entries to surface more available playbooks ---
+- intent: "bridge_summary"
+  description: "Summarize bridge configuration and status"
+  playbook: "playbooks/bridge_summary.yml"
+  target_category: "bridge"
+  required_capabilities: ["bridge"]
+
+- intent: "bridge_check"
+  description: "Validate bridge settings and basic connectivity"
+  playbook: "playbooks/bridge_check.yml"
+  target_category: "bridge"
+  required_capabilities: ["bridge"]
+
+- intent: "router_summary"
+  description: "Summarize router status (routes, interfaces, neighbors)"
+  playbook: "playbooks/router_summary.yml"
+  target_category: "router"
+  required_capabilities: ["routing"]
+
+- intent: "router_neighbors"
+  description: "Show router neighbors (LLDP/CDP/BGP/OSPF as available)"
+  playbook: "playbooks/router_neighbors.yml"
+  target_category: "router"
+  required_capabilities: ["routing"]
+
+- intent: "router_mac_table"
+  description: "Dump router MAC address table (if supported)"
+  playbook: "playbooks/router_mac_table.yml"
+  target_category: "router"
+  required_capabilities: ["routing"]
+
+- intent: "router_arp_table"
+  description: "Dump router ARP/neighbor table"
+  playbook: "playbooks/router_arp_table.yml"
+  target_category: "router"
+  required_capabilities: ["routing"]
+
+- intent: "show_ospf"
+  description: "Show OSPF summary/state"
+  playbook: "playbooks/show_ospf.yml"
+  target_category: "router"
+  required_capabilities: ["routing"]
+
+- intent: "show_ospf_deep"
+  description: "Show OSPF detailed state (areas, neighbors)"
+  playbook: "playbooks/show_ospf_deep.yml"
+  target_category: "router"
+  required_capabilities: ["routing"]
+
+- intent: "show_bgp_deep"
+  description: "Show BGP detailed state (peers, routes)"
+  playbook: "playbooks/show_bgp_deep.yml"
+  target_category: "router"
+  required_capabilities: ["routing"]
+
+- intent: "routers_list"
+  description: "List routers from inventory"
+  playbook: "playbooks/routers_list.yml"
+  target_category: "router"
+  required_capabilities: ["routing"]
+
+- intent: "ping"
+  description: "ICMP reachability test from controller to host"
+  playbook: "playbooks/ping.yml"
+  target_category: "host"
+  required_capabilities: []
+
+- intent: "host_ip"
+  description: "Show host IP addresses"
+  playbook: "playbooks/host_ip.yml"
+  target_category: "host"
+  required_capabilities: []
+
+- intent: "if_toggle"
+  description: "Toggle interface admin state up/down"
+  playbook: "playbooks/if_toggle.yml"
+  target_category: "router"
+  required_capabilities: ["routing"]
+
+- intent: "if_addr"
+  description: "Show interface IP address assignment"
+  playbook: "playbooks/if_addr.yml"
+  target_category: "router"
+  required_capabilities: ["routing"]
