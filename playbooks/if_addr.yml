@@ -1,5 +1,20 @@
 ---
-- hosts: all
-  gather_facts: no
-  vars: {}
-  tasks: []
+- name: Show interface addresses (Linux)
+  hosts: all
+  gather_facts: false
+  become: true
+  tasks:
+    - name: ip -brief address
+      ansible.builtin.command: ip -brief address
+      register: if_addr
+      changed_when: false
+    - name: ip -brief link
+      ansible.builtin.command: ip -brief link
+      register: if_link
+      changed_when: false
+    - name: Output
+      ansible.builtin.debug:
+        msg:
+          address: "{{ if_addr.stdout_lines | default([]) }}"
+          link: "{{ if_link.stdout_lines | default([]) }}"
+

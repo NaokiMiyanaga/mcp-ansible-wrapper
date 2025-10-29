@@ -1,5 +1,43 @@
 ---
-- hosts: all
-  gather_facts: no
-  vars: {}
-  tasks: []
+- name: Export operational data (Linux/FRR/bridge)
+  hosts: all
+  gather_facts: false
+  become: true
+  vars:
+    dest_dir: "{{ dest_dir | default('/tmp/ops_export') }}"
+  tasks:
+    - name: Collect ip -brief address
+      ansible.builtin.command: ip -brief address
+      register: if_addr
+      changed_when: false
+    - name: Collect ip route
+      ansible.builtin.command: ip route
+      register: route4
+      changed_when: false
+    - name: Collect bridge fdb show
+      ansible.builtin.shell: bridge fdb show || true
+      register: br_fdb
+      changed_when: false
+    - name: Collect FRR bgp/ospf (if vtysh exists)
+      ansible.builtin.shell: |
+        if command -v vtysh >/dev/null 2>&1; then
+          vtysh -c "show bgp summary" ; echo "---" ; vtysh -c "show ip ospf neighbor" ;
+        fi
+      register: frr_out
+      changed_when: false
+    - name: Ensure export directory exists
+      ansible.builtin.file:
+        path: "{{ dest_dir }}"
+        state: directory
+        mode: "0755"
+    - name: Write files
+      ansible.builtin.copy:
+        dest: "{{ dest_dir }}/{{ inventory_hostname }}.{{ item.name }}.txt"
+        content: "{{ item.content }}"
+        mode: "0644"
+      loop:
+        - { name: "if_addr", content: "{{ (if_addr.stdout | default('')) }}\n" }
+        - { name: "route4",  content: "{{ (route4.stdout | default('')) }}\n" }
+        - { name: "bridge_fdb", content: "{{ (br_fdb.stdout | default('')) }}\n" }
+        - { name: "frr", content: "{{ (frr_out.stdout | default('')) }}\n" }
+

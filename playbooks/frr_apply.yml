@@ -1,5 +1,65 @@
 ---
-- hosts: all
-  gather_facts: no
-  vars: {}
-  tasks: []
+- name: Apply FRR configuration
+  hosts: all
+  gather_facts: false
+  become: true
+  vars:
+    frr_conf_path: /etc/frr/frr.conf
+    frr_conf_src: "{{ frr_conf_src | default('') }}"
+    frr_config: "{{ frr_config | default('') }}"
+    frr_config_lines: "{{ frr_config_lines | default([]) }}"
+  tasks:
+    - name: Ensure vtysh exists
+      ansible.builtin.command: which vtysh
+      register: vtysh_bin
+      changed_when: false
+    - name: Ensure /etc/frr exists
+      ansible.builtin.file:
+        path: /etc/frr
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+    - name: Deploy frr.conf from local file
+      ansible.builtin.copy:
+        src: "{{ frr_conf_src }}"
+        dest: "{{ frr_conf_path }}"
+        owner: root
+        group: root
+        mode: "0644"
+      when: frr_conf_src | length > 0
+    - name: Deploy frr.conf from inline string
+      ansible.builtin.copy:
+        content: "{{ frr_config }}"
+        dest: "{{ frr_conf_path }}"
+        owner: root
+        group: root
+        mode: "0644"
+      when: frr_config | length > 0
+    - name: Deploy frr.conf from lines
+      ansible.builtin.copy:
+        content: "{{ frr_config_lines | join('\n') }}"
+        dest: "{{ frr_conf_path }}"
+        owner: root
+        group: root
+        mode: "0644"
+      when: frr_config_lines | length > 0
+    - name: Reload FRR service (reload or restart)
+      block:
+        - ansible.builtin.service:
+            name: frr
+            state: reloaded
+      rescue:
+        - ansible.builtin.service:
+            name: frr
+            state: restarted
+    - name: Show running-config (sanity)
+      ansible.builtin.command: vtysh -c "show running-config"
+      register: running
+      changed_when: false
+      when: vtysh_bin.rc == 0
+    - name: Output
+      ansible.builtin.debug:
+        var: running.stdout_lines
+      when: vtysh_bin.rc == 0
+

@@ -1,5 +1,39 @@
 ---
-- hosts: all
-  gather_facts: no
-  vars: {}
-  tasks: []
+- name: Apply Linux bridge configuration
+  hosts: all
+  gather_facts: false
+  become: true
+  vars:
+    bridge: "{{ bridge | default('br0') }}"
+    bridge_ports: "{{ bridge_ports | default([]) }}"
+    bridge_vlans: "{{ bridge_vlans | default({}) }}"
+  tasks:
+    - name: Ensure required tools exist
+      ansible.builtin.shell: command -v ip >/dev/null 2>&1 && command -v bridge >/dev/null 2>&1
+      changed_when: false
+    - name: Ensure bridge exists
+      ansible.builtin.shell: |
+        ip -o link show type bridge | awk '{print $2}' | sed 's/://g' | grep -wq "{{ bridge }}" || ip link add name {{ bridge }} type bridge
+      changed_when: false
+    - name: Enable VLAN filtering when VLANs are defined
+      ansible.builtin.command: ip link set dev {{ bridge }} type bridge vlan_filtering 1
+      when: bridge_vlans | length > 0
+      changed_when: false
+    - name: Bring bridge up
+      ansible.builtin.command: ip link set dev {{ bridge }} up
+      changed_when: false
+    - name: Enslave ports to bridge and bring up
+      ansible.builtin.shell: |
+        ip link set dev {{ item }} master {{ bridge }} || true
+        ip link set dev {{ item }} up || true
+      loop: "{{ bridge_ports }}"
+      changed_when: false
+    - name: Apply VLANs per member port
+      ansible.builtin.shell: |
+        for vid in {{ bridge_vlans[item] | join(' ') }}; do
+          bridge vlan add dev {{ item }} vid "$vid" || true
+        done
+      loop: "{{ bridge_vlans.keys() | list }}"
+      when: bridge_vlans | length > 0
+      changed_when: false
+

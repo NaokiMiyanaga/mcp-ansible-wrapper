@@ -1,5 +1,32 @@
 ---
-- hosts: all
-  gather_facts: no
-  vars: {}
-  tasks: []
+- name: Fix interfaces in UNKNOWN state
+  hosts: all
+  gather_facts: false
+  become: true
+  vars:
+    exclude_ifaces: ["lo"]
+  tasks:
+    - name: List UNKNOWN interfaces
+      ansible.builtin.shell: ip -brief link | awk '$2=="UNKNOWN"{print $1}'
+      register: unknown
+      changed_when: false
+    - name: Filter excludes
+      ansible.builtin.set_fact:
+        unknown_ifaces: "{{ (unknown.stdout_lines | default([])) | difference(exclude_ifaces) }}"
+    - name: Bounce interfaces
+      ansible.builtin.shell: |
+        ip link set dev {{ item }} down || true
+        ip link set dev {{ item }} up || true
+      loop: "{{ unknown_ifaces }}"
+      when: unknown_ifaces | length > 0
+      changed_when: false
+    - name: Show resulting states
+      ansible.builtin.command: ip -brief link
+      register: if_link_new
+      changed_when: false
+    - name: Output
+      ansible.builtin.debug:
+        msg:
+          fixed: "{{ unknown_ifaces | default([]) }}"
+          link: "{{ if_link_new.stdout_lines | default([]) }}"
+

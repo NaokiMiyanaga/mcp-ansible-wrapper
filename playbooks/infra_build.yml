@@ -1,5 +1,22 @@
 ---
-- hosts: all
-  gather_facts: no
-  vars: {}
-  tasks: []
+- name: Build minimal network ops environment (Linux)
+  hosts: all
+  gather_facts: false
+  become: true
+  vars:
+    packages_default:
+      - iproute2
+      - bridge-utils
+      - frr
+    packages: "{{ packages | default(packages_default) }}"
+  tasks:
+    - name: Install required packages
+      ansible.builtin.package:
+        name: "{{ packages }}"
+        state: present
+    - name: Ensure FRR service enabled (best-effort)
+      ansible.builtin.service:
+        name: frr
+        enabled: true
+      ignore_errors: true
+

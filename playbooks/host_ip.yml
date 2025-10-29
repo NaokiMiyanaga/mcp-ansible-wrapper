@@ -1,5 +1,16 @@
 ---
-- hosts: all
-  gather_facts: no
-  vars: {}
-  tasks: []
+- name: Get host IPv4 address information
+  hosts: all
+  gather_facts: true
+  tasks:
+    - name: Collect IPv4 facts
+      ansible.builtin.set_fact:
+        host_ip_addresses: "{{ ansible_all_ipv4_addresses | default([]) }}"
+        host_primary_ip: "{{ ansible_default_ipv4.address | default('') }}"
+    - name: Show host IP info
+      ansible.builtin.debug:
+        msg:
+          hostname: "{{ inventory_hostname }}"
+          primary_ip: "{{ host_primary_ip }}"
+          all_ipv4: "{{ host_ip_addresses }}"
+

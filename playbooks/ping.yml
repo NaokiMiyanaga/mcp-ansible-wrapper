@@ -1,5 +1,19 @@
 ---
-- hosts: all
-  gather_facts: no
-  vars: {}
-  tasks: []
+- name: Ping from host to destination
+  hosts: all
+  gather_facts: false
+  become: true
+  vars:
+    dst: "{{ dst | default('127.0.0.1') }}"
+    count: "{{ count | default(3) }}"
+    timeout: "{{ timeout | default(1) }}"
+  tasks:
+    - name: Run ping
+      ansible.builtin.command: ping -c {{ count }} -W {{ timeout }} {{ dst }}
+      register: ping_out
+      changed_when: false
+      failed_when: ping_out.rc != 0
+    - name: Output
+      ansible.builtin.debug:
+        var: ping_out.stdout_lines
+

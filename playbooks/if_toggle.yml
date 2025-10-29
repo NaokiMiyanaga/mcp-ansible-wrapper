@@ -1,5 +1,26 @@
 ---
-- hosts: all
-  gather_facts: no
-  vars: {}
-  tasks: []
+- name: Toggle interface state
+  hosts: all
+  gather_facts: false
+  become: true
+  vars:
+    ifaces: "{{ ifaces | default([]) }}"
+    iface: "{{ iface | default('') }}"
+    state: "{{ state | default('down') }}"
+  tasks:
+    - name: Resolve target interfaces
+      ansible.builtin.set_fact:
+        targets: "{{ (ifaces if (ifaces | length > 0) else ([iface] if iface else [])) }}"
+    - name: Toggle interfaces
+      ansible.builtin.command: ip link set dev {{ item }} {{ state }}
+      loop: "{{ targets }}"
+      when: targets | length > 0
+      changed_when: false
+    - name: Show status
+      ansible.builtin.command: ip -brief link
+      register: if_link
+      changed_when: false
+    - name: Output
+      ansible.builtin.debug:
+        var: if_link.stdout_lines
+

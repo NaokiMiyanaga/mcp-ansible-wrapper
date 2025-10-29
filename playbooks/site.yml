@@ -1,5 +1,22 @@
 ---
-- hosts: all
-  gather_facts: no
-  vars: {}
-  tasks: []
+- name: Site entry (facts and basic environment check)
+  hosts: all
+  gather_facts: true
+  become: true
+  tasks:
+    - name: Show hostname and primary IP
+      ansible.builtin.debug:
+        msg:
+          hostname: "{{ inventory_hostname }}"
+          primary_ip: "{{ ansible_default_ipv4.address | default('') }}"
+    - name: Ensure key tools exist
+      ansible.builtin.shell: |
+        command -v ip >/dev/null 2>&1 && echo "ip:ok" || echo "ip:missing"
+        command -v bridge >/dev/null 2>&1 && echo "bridge:ok" || echo "bridge:missing"
+        command -v vtysh >/dev/null 2>&1 && echo "vtysh:ok" || echo "vtysh:missing"
+      register: tools
+      changed_when: false
+    - name: Output tools
+      ansible.builtin.debug:
+        var: tools.stdout_lines
+

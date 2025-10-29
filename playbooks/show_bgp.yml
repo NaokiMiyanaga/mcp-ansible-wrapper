@@ -1,6 +1,6 @@
 # playbooks/show_bgp.yml
 - name: Show BGP (minimal JSON)
-  hosts: all
+  hosts: routers
   gather_facts: no
   tasks:
     - name: Build minimal BGP payload

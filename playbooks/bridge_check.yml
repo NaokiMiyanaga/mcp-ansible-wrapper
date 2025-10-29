@@ -1,5 +1,40 @@
 ---
-- hosts: all
-  gather_facts: no
-  vars: {}
-  tasks: []
+- name: Check Linux bridge status
+  hosts: all
+  gather_facts: false
+  become: true
+  vars:
+    bridge: "{{ bridge | default('') }}"
+  tasks:
+    - name: Ensure 'bridge' command is available
+      ansible.builtin.command: which bridge
+      register: bridge_bin
+      changed_when: false
+      failed_when: bridge_bin.rc != 0
+    - name: ip -brief link
+      ansible.builtin.command: ip -brief link
+      register: ip_link
+      changed_when: false
+    - name: bridge link show
+      ansible.builtin.command: >
+        bash -lc '[[ -n "{{ bridge }}" ]] && bridge link show dev {{ bridge }} || bridge link show'
+      register: br_link
+      changed_when: false
+    - name: bridge vlan show
+      ansible.builtin.command: >
+        bash -lc '[[ -n "{{ bridge }}" ]] && bridge vlan show dev {{ bridge }} || bridge vlan show'
+      register: br_vlan
+      changed_when: false
+    - name: bridge fdb show
+      ansible.builtin.command: >
+        bash -lc '[[ -n "{{ bridge }}" ]] && bridge fdb show br {{ bridge }} || bridge fdb show'
+      register: br_fdb
+      changed_when: false
+    - name: Output
+      ansible.builtin.debug:
+        msg:
+          ip_link: "{{ ip_link.stdout_lines | default([]) }}"
+          bridge_link: "{{ br_link.stdout_lines | default([]) }}"
+          bridge_vlan: "{{ br_vlan.stdout_lines | default([]) }}"
+          bridge_fdb: "{{ br_fdb.stdout_lines | default([]) }}"
+
