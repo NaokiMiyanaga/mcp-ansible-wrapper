@@ -1,0 +1,164 @@
+---
+- name: Host to host connectivity matrix
+  hosts: "{{ connectivity_source_group | default('hosts') }}"
+  gather_facts: false
+  become: true
+  vars:
+    connectivity_group_resolved: "{{ connectivity_group | default('hosts') }}"
+    ping_binary: "{{ connectivity_ping_binary | default('ping') }}"
+    ping_count: "{{ connectivity_ping_count | default(3) }}"
+    ping_timeout: "{{ connectivity_ping_timeout | default(1) }}"
+    traceroute_binary: "{{ connectivity_traceroute_binary | default('traceroute') }}"
+    traceroute_max_hops: "{{ connectivity_traceroute_max_hops | default(15) }}"
+    traceroute_wait: "{{ connectivity_traceroute_wait | default(1) }}"
+    destination_hosts: "{{ groups[connectivity_group_resolved] | default([]) | difference([inventory_hostname]) | list | sort }}"
+    connectivity_destinations: []
+  tasks:
+    - name: Determine source address
+      ansible.builtin.set_fact:
+        connectivity_source:
+          name: "{{ inventory_hostname }}"
+          address_ipv4: "{{ hostvars[inventory_hostname].connectivity_ipv4 | default(hostvars[inventory_hostname].ansible_host | default(inventory_hostname)) }}"
+          address_ipv6: "{{ hostvars[inventory_hostname].connectivity_ipv6 | default(hostvars[inventory_hostname].ansible_ipv6 | default('')) }}"
+
+    - name: Build destination list
+      ansible.builtin.set_fact:
+        connectivity_destinations: "{{ connectivity_destinations + [ {
+          'name': item,
+          'address_ipv4': hostvars[item].connectivity_ipv4 | default(hostvars[item].ansible_host | default(item)),
+          'address_ipv6': hostvars[item].connectivity_ipv6 | default(hostvars[item].ansible_ipv6 | default(''))
+        } ] }}"
+      loop: "{{ destination_hosts }}"
+
+    - name: Detect ping binary
+      ansible.builtin.shell: "command -v {{ ping_binary }} || true"
+      register: ping_check
+      changed_when: false
+      failed_when: false
+
+    - name: Detect traceroute binary
+      ansible.builtin.shell: "command -v {{ traceroute_binary }} || true"
+      register: traceroute_check
+      changed_when: false
+      failed_when: false
+
+    - name: Record tool availability
+      ansible.builtin.set_fact:
+        connectivity_tools:
+          ping:
+            binary: "{{ ping_binary }}"
+            available: "{{ ping_check.rc == 0 }}"
+          traceroute:
+            binary: "{{ traceroute_binary }}"
+            available: "{{ traceroute_check.rc == 0 }}"
+
+    - name: Initialize connectivity results container
+      ansible.builtin.set_fact:
+        connectivity_results: []
+
+    - name: Run ping tests
+      ansible.builtin.command: "{{ ping_binary }} -c {{ ping_count }} -W {{ ping_timeout }} {{ item.address_ipv4 }}"
+      loop: "{{ connectivity_destinations }}"
+      loop_control:
+        label: "{{ inventory_hostname }} -> {{ item.address_ipv4 }}"
+      register: ping_results
+      changed_when: false
+      failed_when: false
+      when:
+        - connectivity_tools.ping.available
+        - connectivity_destinations | length > 0
+
+    - name: Run traceroute tests
+      ansible.builtin.command: "{{ traceroute_binary }} -n -m {{ traceroute_max_hops }} -w {{ traceroute_wait }} {{ item.address_ipv4 }}"
+      loop: "{{ connectivity_destinations }}"
+      loop_control:
+        label: "{{ inventory_hostname }} -> {{ item.address_ipv4 }}"
+      register: traceroute_results
+      changed_when: false
+      failed_when: false
+      when:
+        - connectivity_tools.traceroute.available
+        - connectivity_destinations | length > 0
+
+    - name: Aggregate connectivity results
+      ansible.builtin.set_fact:
+        connectivity_results: "{{ (connectivity_results | default([])) + [ {
+          'destination': item.name,
+          'address_ipv4': item.address_ipv4,
+          'address_ipv6': item.address_ipv6,
+          'tests': {
+            'ping': ping_summary,
+            'traceroute': traceroute_summary
+          }
+        } ] }}"
+      loop: "{{ connectivity_destinations }}"
+      loop_control:
+        index_var: dest_index
+      vars:
+        ping_summary: >-
+          {% if ping_results is defined and connectivity_tools.ping.available and (ping_results.results | length > dest_index) %}
+          {{
+            {
+              'available': True,
+              'rc': ping_results.results[dest_index].rc,
+              'success': (ping_results.results[dest_index].rc | default(1)) == 0,
+              'stdout_lines': ping_results.results[dest_index].stdout_lines | default([]),
+              'stderr_lines': ping_results.results[dest_index].stderr_lines | default([]),
+              'summary': ping_results.results[dest_index].stdout | default('')
+            }
+          }}
+          {% else %}
+          {'available': False}
+          {% endif %}
+        traceroute_summary: >-
+          {% if traceroute_results is defined and connectivity_tools.traceroute.available and (traceroute_results.results | length > dest_index) %}
+          {{
+            {
+              'available': True,
+              'rc': traceroute_results.results[dest_index].rc,
+              'success': (traceroute_results.results[dest_index].rc | default(1)) == 0,
+              'stdout_lines': traceroute_results.results[dest_index].stdout_lines | default([]),
+              'stderr_lines': traceroute_results.results[dest_index].stderr_lines | default([]),
+              'summary': traceroute_results.results[dest_index].stdout | default('')
+            }
+          }}
+          {% else %}
+          {'available': False}
+          {% endif %}
+
+    - name: Initialize connectivity summary lines
+      ansible.builtin.set_fact:
+        connectivity_summary_lines: []
+
+    - name: Build connectivity summary lines
+      ansible.builtin.set_fact:
+        connectivity_summary_lines: "{{ (connectivity_summary_lines | default([])) + [ summary_line ] }}"
+      loop: "{{ connectivity_results | default([]) }}"
+      vars:
+        ping_data: "{{ item.tests.ping | default({'available': False}) }}"
+        traceroute_data: "{{ item.tests.traceroute | default({'available': False}) }}"
+        ping_status: >-
+          {% if ping_data.available | default(False) %}
+            {% if ping_data.success | default(False) %}OK{% else %}FAIL{% endif %}
+          {% else %}N/A{% endif %}
+        traceroute_status: >-
+          {% if traceroute_data.available | default(False) %}
+            {% if traceroute_data.success | default(False) %}OK{% else %}FAIL{% endif %}
+          {% else %}N/A{% endif %}
+        ping_detail: >-
+          {% if ping_data.available | default(False) %}
+            (rc={{ ping_data.rc | default('n/a') }})
+          {% else %}{% endif %}
+        traceroute_detail: >-
+          {% if traceroute_data.available | default(False) %}
+            (rc={{ traceroute_data.rc | default('n/a') }})
+          {% else %}{% endif %}
+        summary_line: "{{ connectivity_source.name }} -> {{ item.destination }}: ping={{ ping_status }}{{ ping_detail }} / traceroute={{ traceroute_status }}{{ traceroute_detail }}"
+
+    - name: Connectivity matrix summary
+      ansible.builtin.debug:
+        msg:
+          source: "{{ connectivity_source }}"
+          tools: "{{ connectivity_tools }}"
+          destinations: "{{ connectivity_results | default([]) }}"
+          summary: "{{ connectivity_summary_lines | default([]) }}"
